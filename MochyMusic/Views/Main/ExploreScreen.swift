@@ -43,8 +43,9 @@ struct ExploreScreen: View {
                 }
             }
             .padding(.top, 8)
-            .padding(.bottom, player.currentTrack != nil ? 150 : 96)
+            .padding(.bottom, player.currentTrack != nil ? 175 : 120)
         }
+        .ignoresSafeArea(edges: .bottom)
         .background(Color.mochyEffectiveBackground.ignoresSafeArea())
         .navigationTitle("Explore")
         .navigationBarTitleDisplayMode(.large)

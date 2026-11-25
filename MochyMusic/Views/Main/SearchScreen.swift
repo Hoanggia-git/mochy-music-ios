@@ -42,11 +42,12 @@ struct SearchScreen: View {
                         resultsContent
                     }
                 }
-                .padding(.bottom, player.currentTrack != nil ? 150 : 96)
+                .padding(.bottom, player.currentTrack != nil ? 175 : 120)
             }
+            .ignoresSafeArea(edges: .bottom)
         }
         .background(Color.mochyEffectiveBackground.ignoresSafeArea())
-        .navigationBarHidden(true)
+        .toolbar(.hidden, for: .navigationBar)
         .sheet(isPresented: $showRecognition) {
             RecognitionSheet()
         }

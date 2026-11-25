@@ -27,6 +27,18 @@ targets:
         excludes:
           - Info.plist
           - "*.md"
+          - Resources/po_token.html
+          - Resources/meriyah.js
+          - Resources/astring.js
+          - Resources/yt.solver.core.js
+      - path: MochyMusic/Resources/po_token.html
+        buildPhase: resources
+      - path: MochyMusic/Resources/meriyah.js
+        buildPhase: resources
+      - path: MochyMusic/Resources/astring.js
+        buildPhase: resources
+      - path: MochyMusic/Resources/yt.solver.core.js
+        buildPhase: resources
     info:
       path: MochyMusic/Info.plist
     settings:
@@ -35,6 +47,7 @@ targets:
         PRODUCT_NAME: MochyMusic
         INFOPLIST_FILE: MochyMusic/Info.plist
         TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         CODE_SIGNING_ALLOWED: "NO"
         CODE_SIGNING_REQUIRED: "NO"

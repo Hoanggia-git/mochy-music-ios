@@ -19,6 +19,7 @@ struct ContentView: View {
 
             tabContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .ignoresSafeArea(edges: .bottom)
 
             VStack(spacing: 8) {
                 if player.currentTrack != nil {

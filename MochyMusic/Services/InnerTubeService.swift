@@ -67,6 +67,37 @@ struct ClientProfile {
         platform != nil || osName == "iOS" || osName == "iPadOS" || osName == "Android" || osName == "visionOS"
     }
 
+    var useWebPoTokens: Bool {
+        clientName == "WEB_REMIX" || clientName == "WEB"
+    }
+
+    var useSignatureTimestamp: Bool {
+        clientName == "WEB_REMIX" || clientName == "WEB"
+    }
+
+    var solvesN: Bool {
+        useWebPoTokens
+    }
+
+    var streamHeaders: [String: String] {
+        var headers: [String: String] = [
+            "User-Agent": userAgent,
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9"
+        ]
+        switch clientName {
+        case "WEB_REMIX":
+            headers["Referer"] = "https://music.youtube.com/"
+            headers["Origin"] = "https://music.youtube.com"
+        case "WEB":
+            headers["Referer"] = "https://www.youtube.com/"
+            headers["Origin"] = "https://www.youtube.com"
+        default:
+            break
+        }
+        return headers
+    }
+
     static let originYouTube = "https://www.youtube.com"
     static let originYouTubeMusic = "https://music.youtube.com"
     static let userAgentWeb = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0"
@@ -288,12 +319,11 @@ final class InnerTubeService: ObservableObject {
         if let responseContext = json["responseContext"] as? [String: Any],
            let minted = responseContext["visitorData"] as? String, !minted.isEmpty {
             lock.withLock {
-                if client.ownVisitorId {
-                    ownVisitorIds[client.clientName] = minted
-                } else {
-                    DispatchQueue.main.async {
-                        self.visitorData = minted
-                    }
+                ownVisitorIds[client.clientName] = minted
+            }
+            if !client.ownVisitorId {
+                DispatchQueue.main.async {
+                    self.visitorData = minted
                 }
             }
             return minted
@@ -301,15 +331,20 @@ final class InnerTubeService: ObservableObject {
         throw InnerTubeError.decodingError("visitorData missing from /visitor_id")
     }
 
-    private func visitorId(for client: ClientProfile) async -> String? {
+    private func visitorId(for client: ClientProfile, forceRefresh: Bool = false) async -> String? {
         if client.ownVisitorId {
-            if let cached = lock.withLock({ ownVisitorIds[client.clientName] }) {
+            if !forceRefresh, let cached = lock.withLock({ ownVisitorIds[client.clientName] }) {
                 return cached
             }
             return try? await refreshVisitorId(for: client)
         }
-        if let existing = effectiveVisitorData, !existing.isEmpty {
-            return existing
+        if !forceRefresh {
+            if let existing = effectiveVisitorData, !existing.isEmpty {
+                return existing
+            }
+            if let cached = lock.withLock({ ownVisitorIds[ClientProfile.webRemix.clientName] }) {
+                return cached
+            }
         }
         return try? await refreshVisitorId(for: .webRemix)
     }
@@ -1132,12 +1167,51 @@ final class InnerTubeService: ObservableObject {
             throw InnerTubeError.offlineMode
         }
 
-        let clients: [ClientProfile] = [.ios, .visionOS, .androidVR, .ipados]
+        // VISIONOS serves full tracks directly without PoToken or ciphering; WEB_REMIX/WEB follow with PoToken + EJS cipher/n-solver.
+        // IOS/IPADOS/ANDROID_VR often cap untokened ranges at ~1 MB (403 on tail probe), so they sit last and require tail verification.
+        let clients: [ClientProfile] = [.visionOS, .webRemix, .web, .ipados, .androidVR, .ios]
         var lastError: Error = InnerTubeError.noPlayableStream
+        var cachedPoToken: PoTokenService.PoTokenResult?
+        var attemptedPoToken = false
+        var cachedSignatureTimestamp: Int?
+        var attemptedSigTimestamp = false
 
         for client in clients {
             do {
-                let playerJSON = try await requestPlayer(videoId: videoId, client: client)
+                if client.useSignatureTimestamp && !attemptedSigTimestamp {
+                    attemptedSigTimestamp = true
+                    cachedSignatureTimestamp = await CipherSolverService.shared.signatureTimestamp()
+                }
+
+                if client.useWebPoTokens && !attemptedPoToken {
+                    attemptedPoToken = true
+                    let sessionKey = effectiveDataSyncId ?? (await visitorId(for: client)) ?? ""
+                    if !sessionKey.isEmpty {
+                        cachedPoToken = await PoTokenService.shared.poToken(for: videoId, sessionId: sessionKey)
+                    }
+                }
+
+                var playerJSON = try await requestPlayer(
+                    videoId: videoId,
+                    client: client,
+                    signatureTimestamp: client.useSignatureTimestamp ? cachedSignatureTimestamp : nil,
+                    poToken: client.useWebPoTokens ? cachedPoToken?.playerRequestPoToken : nil
+                )
+
+                // If VISIONOS hit a burned visitorId bot check, mint a fresh visitorId once and retry.
+                if let playability = playerJSON["playabilityStatus"] as? [String: Any],
+                   let status = playability["status"] as? String,
+                   status != "OK",
+                   client.ownVisitorId,
+                   (playability["reason"] as? String)?.localizedCaseInsensitiveContains("bot") == true {
+                    playerJSON = try await requestPlayer(
+                        videoId: videoId,
+                        client: client,
+                        signatureTimestamp: nil,
+                        poToken: nil,
+                        forceRefreshVisitor: true
+                    )
+                }
 
                 if let playability = playerJSON["playabilityStatus"] as? [String: Any],
                    let status = playability["status"] as? String,
@@ -1160,30 +1234,52 @@ final class InnerTubeService: ObservableObject {
 
                 // AVPlayer on iOS natively supports audio/mp4 (AAC / ALAC / FLAC in MP4), not WebM/Opus.
                 let audioMP4Formats = adaptiveFormats.filter { format in
-                    guard let mime = (format["mimeType"] as? String)?.lowercased(),
-                          let urlStr = format["url"] as? String, !urlStr.isEmpty else {
+                    guard let mime = (format["mimeType"] as? String)?.lowercased() else {
                         return false
                     }
+                    let hasDirect = (format["url"] as? String).map { !$0.isEmpty } ?? false
+                    let hasCipher = (format["signatureCipher"] as? String ?? format["cipher"] as? String).map { !$0.isEmpty } ?? false
                     let isAudio = mime.hasPrefix("audio/") && format["width"] == nil
                     let isAppleCompatible = mime.contains("audio/mp4") || mime.contains("mp4a")
-                    return isAudio && isAppleCompatible
+                    return (hasDirect || hasCipher) && isAudio && isAppleCompatible
                 }
 
-                if let selected = selectBestFormat(from: audioMP4Formats, quality: quality),
-                   let urlString = selected["url"] as? String,
-                   let streamURL = URL(string: urlString) {
+                let orderedCandidates = orderFormats(audioMP4Formats, quality: quality)
+                for selected in orderedCandidates {
+                    guard var resolvedURL = await extractPlayableURL(from: selected, client: client) else {
+                        continue
+                    }
+
+                    if client.solvesN {
+                        resolvedURL = await CipherSolverService.shared.transformNParam(in: resolvedURL)
+                    }
+                    if client.useWebPoTokens, let streamingPot = cachedPoToken?.streamingDataPoToken {
+                        resolvedURL = appendQueryItem(name: "pot", value: streamingPot, to: resolvedURL)
+                    }
+
+                    let contentLength = (selected["contentLength"] as? String).flatMap(Int64.init) ?? (selected["contentLength"] as? Int64) ?? 0
+                    let headers = client.streamHeaders
+
+                    // Verify tail byte-range access so AVPlayer never stalls on an untokened ~1 MB 403 cutoff.
+                    if contentLength > 1024 {
+                        let readable = await verifyStreamTailReadable(url: resolvedURL, contentLength: contentLength, headers: headers)
+                        if !readable {
+                            continue
+                        }
+                    }
+
                     let itag = selected["itag"] as? Int ?? 140
                     let mimeType = selected["mimeType"] as? String ?? "audio/mp4"
                     let bitrate = selected["bitrate"] as? Int ?? 128_000
                     let sampleRate = (selected["audioSampleRate"] as? String).flatMap(Int.init) ?? (selected["audioSampleRate"] as? Int)
-                    let contentLength = (selected["contentLength"] as? String).flatMap(Int64.init) ?? (selected["contentLength"] as? Int64) ?? 0
                     let formatLoudness = (selected["loudnessDb"] as? Double) ?? loudnessDb
                     let codecs = extractCodecs(from: mimeType)
-
                     let kbps = max(48, bitrate / 1000)
+
                     return ResolvedStream(
-                        url: streamURL,
+                        url: resolvedURL,
                         userAgent: client.userAgent,
+                        httpHeaders: headers,
                         isAudioOnly: true,
                         itag: itag,
                         mimeType: mimeType.components(separatedBy: ";").first ?? "audio/mp4",
@@ -1197,14 +1293,16 @@ final class InnerTubeService: ObservableObject {
                     )
                 }
 
-                // Fallback 1: HLS manifest (native AVPlayer support, great on IOS/VISIONOS)
+                // Fallback 1: Audio-only HLS track or Master HLS manifest (native AVPlayer support, zero 403 cutoff)
                 if let hlsUrlStr = streamingData["hlsManifestUrl"] as? String,
-                   let hlsURL = URL(string: hlsUrlStr) {
+                   let masterHLS = URL(string: hlsUrlStr) {
+                    let resolvedHLS = (await extractAudioOnlyHLSURL(from: masterHLS, headers: client.streamHeaders)) ?? masterHLS
                     return ResolvedStream(
-                        url: hlsURL,
+                        url: resolvedHLS,
                         userAgent: client.userAgent,
-                        isAudioOnly: false,
-                        itag: 91,
+                        httpHeaders: client.streamHeaders,
+                        isAudioOnly: resolvedHLS != masterHLS,
+                        itag: 234,
                         mimeType: "application/x-mpegURL",
                         codecs: "mp4a.40.2",
                         bitrate: 128_000,
@@ -1218,27 +1316,40 @@ final class InnerTubeService: ObservableObject {
 
                 // Fallback 2: Muxed MP4 format
                 let muxedMP4 = legacyFormats.filter { format in
-                    guard let mime = (format["mimeType"] as? String)?.lowercased(),
-                          let urlStr = format["url"] as? String, !urlStr.isEmpty else {
+                    guard let mime = (format["mimeType"] as? String)?.lowercased() else {
                         return false
                     }
-                    return mime.contains("video/mp4")
+                    let hasDirect = (format["url"] as? String).map { !$0.isEmpty } ?? false
+                    let hasCipher = (format["signatureCipher"] as? String ?? format["cipher"] as? String).map { !$0.isEmpty } ?? false
+                    return (hasDirect || hasCipher) && mime.contains("video/mp4")
                 }
 
                 if let selected = muxedMP4.max(by: { ($0["bitrate"] as? Int ?? 0) < ($1["bitrate"] as? Int ?? 0) }),
-                   let urlString = selected["url"] as? String,
-                   let streamURL = URL(string: urlString) {
+                   var streamURL = await extractPlayableURL(from: selected, client: client) {
+                    if client.solvesN {
+                        streamURL = await CipherSolverService.shared.transformNParam(in: streamURL)
+                    }
+                    let contentLength = (selected["contentLength"] as? String).flatMap(Int64.init) ?? (selected["contentLength"] as? Int64) ?? 0
+                    let headers = client.streamHeaders
+                    if contentLength > 1024 {
+                        let readable = await verifyStreamTailReadable(url: streamURL, contentLength: contentLength, headers: headers)
+                        if !readable {
+                            continue
+                        }
+                    }
+
                     let muxBitrate = selected["bitrate"] as? Int ?? 128_000
                     return ResolvedStream(
                         url: streamURL,
                         userAgent: client.userAgent,
+                        httpHeaders: headers,
                         isAudioOnly: false,
                         itag: selected["itag"] as? Int ?? 18,
                         mimeType: "video/mp4",
                         codecs: "mp4a.40.2",
                         bitrate: muxBitrate,
                         sampleRate: 44100,
-                        contentLength: (selected["contentLength"] as? String).flatMap(Int64.init) ?? 0,
+                        contentLength: contentLength,
                         loudnessDb: loudnessDb,
                         sourceLabel: "YouTube Music",
                         qualityBadgeText: "AAC · \(max(48, muxBitrate / 1000)) kbps"
@@ -1252,18 +1363,113 @@ final class InnerTubeService: ObservableObject {
         throw lastError
     }
 
-    private func requestPlayer(videoId: String, client: ClientProfile) async throws -> [String: Any] {
-        let visitor = await visitorId(for: client)
+    private func requestPlayer(
+        videoId: String,
+        client: ClientProfile,
+        signatureTimestamp: Int? = nil,
+        poToken: String? = nil,
+        forceRefreshVisitor: Bool = false
+    ) async throws -> [String: Any] {
+        let visitor = await visitorId(for: client, forceRefresh: forceRefreshVisitor)
         guard let url = URL(string: "\(client.apiOrigin)/youtubei/v1/player?prettyPrint=false") else {
             throw InnerTubeError.invalidURL
         }
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "context": client.contextPayload(gl: currentGL, hl: currentHL, visitorData: visitor, dataSyncId: effectiveDataSyncId),
             "videoId": videoId,
             "contentCheckOk": true,
             "racyCheckOk": true
         ]
+        if let signatureTimestamp {
+            body["playbackContext"] = [
+                "contentPlaybackContext": [
+                    "signatureTimestamp": signatureTimestamp
+                ]
+            ]
+        }
+        if let poToken, !poToken.isEmpty {
+            body["serviceIntegrityDimensions"] = [
+                "poToken": poToken
+            ]
+        }
         return try await postJSON(url: url, client: client, body: body, visitorOverride: visitor)
+    }
+
+    private func orderFormats(_ formats: [[String: Any]], quality: StreamQuality) -> [[String: Any]] {
+        guard !formats.isEmpty else { return [] }
+        guard let preferred = selectBestFormat(from: formats, quality: quality) else { return formats }
+        let rest = formats
+            .sorted { ($0["bitrate"] as? Int ?? 0) > ($1["bitrate"] as? Int ?? 0) }
+            .filter { ($0["itag"] as? Int) != (preferred["itag"] as? Int) }
+        return [preferred] + rest
+    }
+
+    private func extractPlayableURL(from format: [String: Any], client: ClientProfile) async -> URL? {
+        if let urlStr = format["url"] as? String, !urlStr.isEmpty, let url = URL(string: urlStr) {
+            return url
+        }
+        if let cipher = (format["signatureCipher"] as? String) ?? (format["cipher"] as? String), !cipher.isEmpty {
+            return await CipherSolverService.shared.deobfuscateSignatureCipher(cipher)
+        }
+        return nil
+    }
+
+    private func appendQueryItem(name: String, value: String, to url: URL) -> URL {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        var items = components.queryItems ?? []
+        items.removeAll { $0.name == name }
+        items.append(URLQueryItem(name: name, value: value))
+        components.queryItems = items
+        return components.url ?? url
+    }
+
+    private func verifyStreamTailReadable(url: URL, contentLength: Int64, headers: [String: String]) async -> Bool {
+        let start = max(0, contentLength - 512)
+        let end = contentLength - 1
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 8
+        req.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
+        for (k, v) in headers {
+            req.setValue(v, forHTTPHeaderField: k)
+        }
+        do {
+            let (_, response) = try await session.data(for: req)
+            if let http = response as? HTTPURLResponse {
+                return (200...299).contains(http.statusCode)
+            }
+            return false
+        } catch {
+            return false
+        }
+    }
+
+    private func extractAudioOnlyHLSURL(from masterURL: URL, headers: [String: String]) async -> URL? {
+        var req = URLRequest(url: masterURL)
+        req.timeoutInterval = 8
+        for (k, v) in headers {
+            req.setValue(v, forHTTPHeaderField: k)
+        }
+        guard let (data, response) = try? await session.data(for: req),
+              let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+              let manifest = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+
+        let audioLines = manifest
+            .components(separatedBy: .newlines)
+            .filter { $0.contains("#EXT-X-MEDIA:") && $0.contains("TYPE=AUDIO") }
+
+        var candidateURIs: [(itag: Int, url: URL)] = []
+        for line in audioLines {
+            guard let uriStart = line.range(of: "URI=\"") else { continue }
+            let after = line[uriStart.upperBound...]
+            guard let uriEnd = after.firstIndex(of: "\"") else { continue }
+            let uriString = String(after[..<uriEnd])
+            guard let url = URL(string: uriString) else { continue }
+            let itagMatch = line.range(of: "GROUP-ID=\"234\"") != nil ? 234 : (line.range(of: "GROUP-ID=\"233\"") != nil ? 233 : 230)
+            candidateURIs.append((itag: itagMatch, url: url))
+        }
+        return candidateURIs.max(by: { $0.itag < $1.itag })?.url
     }
 
     private func selectBestFormat(from formats: [[String: Any]], quality: StreamQuality) -> [String: Any]? {

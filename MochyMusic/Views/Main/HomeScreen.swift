@@ -110,10 +110,11 @@ struct HomeScreen: View {
                     }
                 }
                 .padding(.top, 8)
-                .padding(.bottom, player.currentTrack != nil ? 150 : 96)
+                .padding(.bottom, player.currentTrack != nil ? 175 : 120)
             }
+            .ignoresSafeArea(edges: .bottom)
         }
-        .navigationBarHidden(true)
+        .toolbar(.hidden, for: .navigationBar)
         .refreshable {
             await viewModel.refresh()
         }
@@ -134,18 +135,22 @@ struct HomeScreen: View {
     // MARK: - Header
 
     private var headerView: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(viewModel.greetingText)
                     .font(MochyTheme.titleFont(size: 26))
                     .foregroundColor(.mochyOnBackground)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
 
                 Text(settings.ytAccountName.isEmpty ? settings.username : settings.ytAccountName)
                     .font(.mochyCaption)
                     .foregroundColor(.mochySecondary)
+                    .lineLimit(1)
             }
+            .layoutPriority(1)
 
-            Spacer()
+            Spacer(minLength: 8)
 
             Button {
                 showRecognition = true

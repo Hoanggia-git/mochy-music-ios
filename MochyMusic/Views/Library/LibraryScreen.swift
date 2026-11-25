@@ -116,13 +116,14 @@ struct LibraryScreen: View {
 
                 Section {
                     Color.clear
-                        .frame(height: player.currentTrack != nil ? 140 : 88)
+                        .frame(height: player.currentTrack != nil ? 175 : 120)
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)
                 }
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
+            .ignoresSafeArea(edges: .bottom)
             .background(Color.mochyEffectiveBackground.ignoresSafeArea())
 
             // Floating Action Button to create playlist
@@ -140,9 +141,9 @@ struct LibraryScreen: View {
             }
             .buttonStyle(.plain)
             .padding(.trailing, 18)
-            .padding(.bottom, player.currentTrack != nil ? 148 : 84)
+            .padding(.bottom, player.currentTrack != nil ? 168 : 104)
         }
-        .navigationBarHidden(true)
+        .toolbar(.hidden, for: .navigationBar)
         .task(id: settings.ytInnerTubeCookie) {
             if !settings.ytInnerTubeCookie.isEmpty && ytPlaylists.isEmpty && ytLikedSongs.isEmpty {
                 await syncYouTubeLibrary()

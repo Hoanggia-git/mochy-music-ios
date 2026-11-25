@@ -83,6 +83,7 @@ enum StreamQuality: String, Codable, CaseIterable, Identifiable {
 struct ResolvedStream: Codable, Hashable {
     var url: URL
     var userAgent: String?
+    var httpHeaders: [String: String]
     var isAudioOnly: Bool
     var itag: Int
     var mimeType: String
@@ -97,6 +98,7 @@ struct ResolvedStream: Codable, Hashable {
     init(
         url: URL,
         userAgent: String? = nil,
+        httpHeaders: [String: String] = [:],
         isAudioOnly: Bool = true,
         itag: Int = 140,
         mimeType: String = "audio/mp4",
@@ -110,6 +112,7 @@ struct ResolvedStream: Codable, Hashable {
     ) {
         self.url = url
         self.userAgent = userAgent
+        self.httpHeaders = httpHeaders
         self.isAudioOnly = isAudioOnly
         self.itag = itag
         self.mimeType = mimeType

@@ -31,6 +31,8 @@ final class AudioPlayerManager: NSObject, ObservableObject {
     private var fadeOutPlayer: AVPlayer?
     private var timeObserverToken: Any?
     private var endObserver: NSObjectProtocol?
+    private var failedObserver: NSObjectProtocol?
+    private var statusObserver: NSKeyValueObservation?
     private var interruptionObserver: NSObjectProtocol?
     private var routeObserver: NSObjectProtocol?
 
@@ -500,60 +502,17 @@ final class AudioPlayerManager: NSObject, ObservableObject {
         loadTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let playerItem: AVPlayerItem
-                var resolvedLoudness: Double?
-                var isHLS = false
-
-                if let localURL = track.resolvedLocalURL, FileManager.default.fileExists(atPath: localURL.path) {
-                    let asset = AVURLAsset(url: localURL)
-                    playerItem = AVPlayerItem(asset: asset)
-                    if let mix = await EqualizerService.shared.createAudioMix(for: asset) {
-                        playerItem.audioMix = mix
-                    }
-                    self.currentStream = ResolvedStream(
-                        url: localURL,
-                        isAudioOnly: true,
-                        mimeType: "audio/mp4",
-                        codecs: localURL.pathExtension.lowercased(),
-                        sourceLabel: "Local File",
-                        qualityBadgeText: localURL.pathExtension.uppercased()
-                    )
-                } else if let downloadedURL = LibraryStore.shared.localFileURL(forTrackId: track.id) {
-                    let asset = AVURLAsset(url: downloadedURL)
-                    playerItem = AVPlayerItem(asset: asset)
-                    if let mix = await EqualizerService.shared.createAudioMix(for: asset) {
-                        playerItem.audioMix = mix
-                    }
-                    self.currentStream = ResolvedStream(
-                        url: downloadedURL,
-                        isAudioOnly: true,
-                        mimeType: "audio/mp4",
-                        codecs: downloadedURL.pathExtension.lowercased(),
-                        sourceLabel: "Downloaded",
-                        qualityBadgeText: "Offline · AAC"
-                    )
-                } else {
-                    let stream = try await self.resolveStreamWithPreferredSource(for: track)
-                    if Task.isCancelled { return }
-                    self.currentStream = stream
-                    resolvedLoudness = stream.loudnessDb
-                    isHLS = stream.mimeType.lowercased().contains("mpegurl") || stream.url.pathExtension.lowercased() == "m3u8"
-
-                    var headers: [String: String] = [:]
-                    if let ua = stream.userAgent {
-                        headers["User-Agent"] = ua
-                    }
-                    let asset = AVURLAsset(
-                        url: stream.url,
-                        options: headers.isEmpty ? nil : ["AVURLAssetHTTPHeaderFieldsKey": headers]
-                    )
-                    playerItem = AVPlayerItem(asset: asset)
-                    if !isHLS, let mix = await EqualizerService.shared.createAudioMix(for: asset) {
-                        playerItem.audioMix = mix
-                    }
+                let prepared = try await self.preparePlayerItem(for: track)
+                if Task.isCancelled {
+                    prepared.player.pause()
+                    prepared.player.replaceCurrentItem(with: nil)
+                    return
                 }
 
-                if Task.isCancelled { return }
+                let newPlayer = prepared.player
+                let playerItem = prepared.item
+                let resolvedLoudness = prepared.loudnessDb
+                self.currentStream = prepared.stream
 
                 // Volume normalization relative to -14 LUFS
                 let targetVolume = self.normalizedVolume(loudnessDb: resolvedLoudness)
@@ -569,7 +528,6 @@ final class AudioPlayerManager: NSObject, ObservableObject {
                     self.player = nil
                 }
 
-                let newPlayer = AVPlayer(playerItem: playerItem)
                 newPlayer.automaticallyWaitsToMinimizeStalling = true
                 newPlayer.volume = isCrossfadeHandoff ? 0.0 : targetVolume
                 self.player = newPlayer
@@ -616,29 +574,207 @@ final class AudioPlayerManager: NSObject, ObservableObject {
         }
     }
 
-    private func resolveStreamWithPreferredSource(for track: Track) async throws -> ResolvedStream {
+    private struct PreparedPlayback {
+        let player: AVPlayer
+        let item: AVPlayerItem
+        let stream: ResolvedStream
+        let loudnessDb: Double?
+    }
+
+    private func preparePlayerItem(for track: Track) async throws -> PreparedPlayback {
+        if let localURL = track.resolvedLocalURL, FileManager.default.fileExists(atPath: localURL.path) {
+            let asset = AVURLAsset(url: localURL)
+            let item = AVPlayerItem(asset: asset)
+            if EqualizerService.shared.isEnabled,
+               let mix = await EqualizerService.shared.createAudioMix(for: asset) {
+                item.audioMix = mix
+            }
+            let stream = ResolvedStream(
+                url: localURL,
+                isAudioOnly: true,
+                mimeType: "audio/mp4",
+                codecs: localURL.pathExtension.lowercased(),
+                sourceLabel: "Local File",
+                qualityBadgeText: localURL.pathExtension.uppercased()
+            )
+            return PreparedPlayback(player: AVPlayer(playerItem: item), item: item, stream: stream, loudnessDb: nil)
+        }
+
+        if let downloadedURL = LibraryStore.shared.localFileURL(forTrackId: track.id) {
+            let asset = AVURLAsset(url: downloadedURL)
+            let item = AVPlayerItem(asset: asset)
+            if EqualizerService.shared.isEnabled,
+               let mix = await EqualizerService.shared.createAudioMix(for: asset) {
+                item.audioMix = mix
+            }
+            let stream = ResolvedStream(
+                url: downloadedURL,
+                isAudioOnly: true,
+                mimeType: "audio/mp4",
+                codecs: downloadedURL.pathExtension.lowercased(),
+                sourceLabel: "Downloaded",
+                qualityBadgeText: "Offline · AAC"
+            )
+            return PreparedPlayback(player: AVPlayer(playerItem: item), item: item, stream: stream, loudnessDb: nil)
+        }
+
+        let orderedSources = streamSourceOrder(for: track)
+        var lastError: Error = InnerTubeError.noPlayableStream
+
+        for resolver in orderedSources {
+            if Task.isCancelled { throw CancellationError() }
+            do {
+                let stream = try await resolver()
+                if Task.isCancelled { throw CancellationError() }
+
+                let (candidatePlayer, candidateItem) = try await buildAndValidateRemoteItem(for: stream)
+                return PreparedPlayback(player: candidatePlayer, item: candidateItem, stream: stream, loudnessDb: stream.loudnessDb)
+            } catch {
+                if Task.isCancelled { throw error }
+                lastError = error
+            }
+        }
+
+        throw lastError
+    }
+
+    private func buildAndValidateRemoteItem(for stream: ResolvedStream) async throws -> (AVPlayer, AVPlayerItem) {
+        let isHLS = stream.mimeType.lowercased().contains("mpegurl") || stream.url.pathExtension.lowercased() == "m3u8"
+
+        var playbackURL = stream.url
+        if !isHLS {
+            var mergedHeaders = stream.httpHeaders
+            if let ua = stream.userAgent, !ua.isEmpty, mergedHeaders["User-Agent"] == nil {
+                mergedHeaders["User-Agent"] = ua
+            }
+            if !mergedHeaders.isEmpty,
+               let proxied = await LocalStreamProxy.shared.proxyURL(for: stream.url, headers: mergedHeaders, mimeTypeHint: stream.mimeType) {
+                playbackURL = proxied
+            }
+        }
+
+        let asset = AVURLAsset(url: playbackURL)
+        let item = AVPlayerItem(asset: asset)
+        if !isHLS && EqualizerService.shared.isEnabled,
+           let mix = await EqualizerService.shared.createAudioMix(for: asset) {
+            item.audioMix = mix
+        }
+
+        let candidatePlayer = AVPlayer(playerItem: item)
+        candidatePlayer.volume = 0
+        do {
+            try await waitUntilReady(item: item)
+            return (candidatePlayer, item)
+        } catch {
+            candidatePlayer.pause()
+            candidatePlayer.replaceCurrentItem(with: nil)
+            throw error
+        }
+    }
+
+    private func waitUntilReady(item: AVPlayerItem) async throws {
+        if item.status == .readyToPlay { return }
+        if item.status == .failed {
+            throw item.error ?? InnerTubeError.noPlayableStream
+        }
+
+        final class ReadinessBox {
+            let lock = NSLock()
+            var settled = false
+            var observation: NSKeyValueObservation?
+            var continuation: CheckedContinuation<Void, Error>?
+
+            func finish(result: Result<Void, Error>) {
+                lock.lock()
+                guard !settled else {
+                    lock.unlock()
+                    return
+                }
+                settled = true
+                let obs = observation
+                observation = nil
+                let cont = continuation
+                continuation = nil
+                lock.unlock()
+
+                obs?.invalidate()
+                if let cont {
+                    switch result {
+                    case .success: cont.resume()
+                    case .failure(let err): cont.resume(throwing: err)
+                    }
+                }
+            }
+        }
+
+        let box = ReadinessBox()
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await withTaskCancellationHandler {
+                    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                        box.lock.lock()
+                        box.continuation = continuation
+                        box.observation = item.observe(\.status, options: [.initial, .new]) { observedItem, _ in
+                            switch observedItem.status {
+                            case .readyToPlay:
+                                box.finish(result: .success(()))
+                            case .failed:
+                                box.finish(result: .failure(observedItem.error ?? InnerTubeError.noPlayableStream))
+                            case .unknown:
+                                break
+                            @unknown default:
+                                break
+                            }
+                        }
+                        box.lock.unlock()
+                    }
+                } onCancel: {
+                    box.finish(result: .failure(CancellationError()))
+                }
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: 14_000_000_000)
+                throw NSError(domain: "AudioPlayerManager", code: -1001, userInfo: [NSLocalizedDescriptionKey: "Stream timed out while buffering"])
+            }
+            try await group.next()
+            group.cancelAll()
+        }
+    }
+
+    private func streamSourceOrder(for track: Track) -> [() async throws -> ResolvedStream] {
         let settings = AppSettings.shared
         let source = settings.preferredAudioSource.lowercased()
         let quality = settings.audioQuality
 
-        if source == "monochrome" && settings.monochromeEnabled {
-            if let stream = try? await MonochromeService.shared.resolveStream(for: track) {
-                return stream
-            }
-        } else if source == "jiosaavn" && settings.jiosaavnEnabled {
-            if let stream = try? await JioSaavnService.shared.resolveStream(for: track, quality: settings.jiosaavnQuality) {
-                return stream
-            }
-        } else if settings.monochromeEnabled && (quality == .lossless || quality == .hiResLossless) {
-            if let stream = try? await MonochromeService.shared.resolveStream(for: track) {
-                return stream
-            }
+        let youtubeResolver: () async throws -> ResolvedStream = {
+            try await InnerTubeService.shared.resolveStream(videoId: track.id, quality: quality)
+        }
+        let monochromeResolver: () async throws -> ResolvedStream = {
+            try await MonochromeService.shared.resolveStream(for: track)
+        }
+        let jiosaavnResolver: () async throws -> ResolvedStream = {
+            try await JioSaavnService.shared.resolveStream(for: track, quality: settings.jiosaavnQuality)
         }
 
-        return try await InnerTubeService.shared.resolveStream(
-            videoId: track.id,
-            quality: quality
-        )
+        var resolvers: [() async throws -> ResolvedStream] = []
+        if source == "monochrome" && settings.monochromeEnabled {
+            resolvers.append(monochromeResolver)
+            resolvers.append(youtubeResolver)
+            if settings.jiosaavnEnabled { resolvers.append(jiosaavnResolver) }
+        } else if source == "jiosaavn" && settings.jiosaavnEnabled {
+            resolvers.append(jiosaavnResolver)
+            resolvers.append(youtubeResolver)
+            if settings.monochromeEnabled { resolvers.append(monochromeResolver) }
+        } else if settings.monochromeEnabled && (quality == .lossless || quality == .hiResLossless) {
+            resolvers.append(monochromeResolver)
+            resolvers.append(youtubeResolver)
+            if settings.jiosaavnEnabled { resolvers.append(jiosaavnResolver) }
+        } else {
+            resolvers.append(youtubeResolver)
+            if settings.monochromeEnabled { resolvers.append(monochromeResolver) }
+            if settings.jiosaavnEnabled { resolvers.append(jiosaavnResolver) }
+        }
+        return resolvers
     }
 
     private func normalizedVolume(loudnessDb: Double?) -> Float {
@@ -701,6 +837,29 @@ final class AudioPlayerManager: NSObject, ObservableObject {
                 if !self.didCrossfadeCurrentTrack {
                     self.next()
                 }
+            }
+        }
+
+        failedObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] notification in
+            let err = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.isPlaying = false
+                self.errorMessage = err?.localizedDescription ?? "Stream playback failed"
+            }
+        }
+
+        statusObserver = item.observe(\.status, options: [.new]) { [weak self] observedItem, _ in
+            guard observedItem.status == .failed else { return }
+            let message = observedItem.error?.localizedDescription ?? "Playback failed"
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.isPlaying = false
+                self.errorMessage = message
             }
         }
     }
@@ -767,6 +926,12 @@ final class AudioPlayerManager: NSObject, ObservableObject {
                 NotificationCenter.default.removeObserver(endObserver)
                 self.endObserver = nil
             }
+            if let failedObserver {
+                NotificationCenter.default.removeObserver(failedObserver)
+                self.failedObserver = nil
+            }
+            statusObserver?.invalidate()
+            statusObserver = nil
         }
         target.pause()
         target.replaceCurrentItem(with: nil)
