@@ -8,13 +8,14 @@ options:
 
 settings:
   base:
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "5.0"
     IPHONEOS_DEPLOYMENT_TARGET: "16.0"
-    TARGETED_DEVICE_FAMILY: "1,2"
-    ENABLE_BITCODE: "NO"
     CODE_SIGNING_ALLOWED: "NO"
     CODE_SIGNING_REQUIRED: "NO"
     CODE_SIGN_IDENTITY: ""
+    ENABLE_BITCODE: "NO"
 
 targets:
   MochyMusic:
@@ -24,21 +25,22 @@ targets:
     sources:
       - path: MochyMusic
         excludes:
-          - "**/*.md"
-          - "Info.plist"
+          - Info.plist
+          - "*.md"
     info:
       path: MochyMusic/Info.plist
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.mochyy.mochymusic.ios
+        PRODUCT_BUNDLE_IDENTIFIER: com.mochyy.mochymusic
         PRODUCT_NAME: MochyMusic
-        MARKETING_VERSION: "1.0.0"
-        CURRENT_PROJECT_VERSION: "1"
-        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        INFOPLIST_FILE: MochyMusic/Info.plist
+        TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         CODE_SIGNING_ALLOWED: "NO"
         CODE_SIGNING_REQUIRED: "NO"
         CODE_SIGN_IDENTITY: ""
-        INFOPLIST_FILE: MochyMusic/Info.plist
-        GENERATE_INFOPLIST_FILE: "NO"
-        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: "NO"
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/Frameworks"
+    scheme:
+      testTargets: []
