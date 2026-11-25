@@ -57,7 +57,8 @@ final class KuGouLyricsService {
         guard !keyword.isEmpty else { return nil }
 
         // 1. Search songs by keyword and match hash within 8 seconds tolerance
-        if let songs = await searchSongs(keyword: "\(cleanedTitle) - \(cleanedArtist)"), !songs.isEmpty {
+        let songs = await searchSongs(keyword: "\(cleanedTitle) - \(cleanedArtist)")
+        if !songs.isEmpty {
             for song in songs {
                 if let durationSeconds, durationSeconds > 0, let songDur = song.duration,
                    abs(songDur - durationSeconds) > 8 {
