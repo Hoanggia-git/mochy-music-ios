@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import CoreImage
+import CoreImage
 
 /// Main Home feed featuring ambient HomeTopGlow, Speed Dial Hero Carousel, quick-play grid, mood chips, and 3-row HomeTrackGrid shelves.
 struct HomeScreen: View {

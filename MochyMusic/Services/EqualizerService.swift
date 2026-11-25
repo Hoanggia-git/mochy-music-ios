@@ -200,35 +200,6 @@ private final class EQTapProcessor {
     }
 }
 
-private let eqTapInitCallback: MTAudioProcessingTapInitCallback = { _, clientInfo, tapStorageOut in
-    tapStorageOut.pointee = clientInfo
-}
-
-private let eqTapFinalizeCallback: MTAudioProcessingTapFinalizeCallback = { tap in
-    let storage = MTAudioProcessingTapGetStorage(tap)
-    Unmanaged<EQTapProcessor>.fromOpaque(storage).release()
-}
-
-private let eqTapPrepareCallback: MTAudioProcessingTapPrepareCallback = { tap, _, processingFormat in
-    let storage = MTAudioProcessingTapGetStorage(tap)
-    let processor = Unmanaged<EQTapProcessor>.fromOpaque(storage).takeUnretainedValue()
-    processor.prepare(
-        sampleRate: Float(processingFormat.pointee.mSampleRate),
-        channels: Int(processingFormat.pointee.mChannelsPerFrame),
-        formatFlags: processingFormat.pointee.mFormatFlags
-    )
-}
-
-private let eqTapUnprepareCallback: MTAudioProcessingTapUnprepareCallback = { _ in }
-
-private let eqTapProcessCallback: MTAudioProcessingTapProcessCallback = { tap, numberFrames, _, bufferListInOut, numberFramesOut, flagsOut in
-    let status = MTAudioProcessingTapGetSourceAudio(tap, numberFrames, bufferListInOut, flagsOut, nil, numberFramesOut)
-    guard status == noErr else { return }
-    let storage = MTAudioProcessingTapGetStorage(tap)
-    let processor = Unmanaged<EQTapProcessor>.fromOpaque(storage).takeUnretainedValue()
-    processor.process(bufferList: bufferListInOut, frameCount: Int(numberFramesOut.pointee))
-}
-
 // MARK: - EqualizerService
 
 /// AVAudioEngine + MTAudioProcessingTap 10-band parametric equalizer, reverb, pitch shift, and bass boost service.
@@ -385,11 +356,30 @@ final class EqualizerService: ObservableObject {
         var callbacks = MTAudioProcessingTapCallbacks(
             version: kMTAudioProcessingTapCallbacksVersion_0,
             clientInfo: retainedPtr,
-            init: eqTapInitCallback,
-            finalize: eqTapFinalizeCallback,
-            prepare: eqTapPrepareCallback,
-            unprepare: eqTapUnprepareCallback,
-            process: eqTapProcessCallback
+            init: { _, clientInfo, tapStorageOut in
+                tapStorageOut.pointee = clientInfo
+            },
+            finalize: { tap in
+                let storage = MTAudioProcessingTapGetStorage(tap)
+                Unmanaged<EQTapProcessor>.fromOpaque(storage).release()
+            },
+            prepare: { tap, _, processingFormat in
+                let storage = MTAudioProcessingTapGetStorage(tap)
+                let processor = Unmanaged<EQTapProcessor>.fromOpaque(storage).takeUnretainedValue()
+                processor.prepare(
+                    sampleRate: Float(processingFormat.pointee.mSampleRate),
+                    channels: Int(processingFormat.pointee.mChannelsPerFrame),
+                    formatFlags: processingFormat.pointee.mFormatFlags
+                )
+            },
+            unprepare: { _ in },
+            process: { tap, numberFrames, _, bufferListInOut, numberFramesOut, flagsOut in
+                let status = MTAudioProcessingTapGetSourceAudio(tap, numberFrames, bufferListInOut, flagsOut, nil, numberFramesOut)
+                guard status == noErr else { return }
+                let storage = MTAudioProcessingTapGetStorage(tap)
+                let processor = Unmanaged<EQTapProcessor>.fromOpaque(storage).takeUnretainedValue()
+                processor.process(bufferList: bufferListInOut, frameCount: Int(numberFramesOut.pointee))
+            }
         )
 
         var tap: MTAudioProcessingTap?
