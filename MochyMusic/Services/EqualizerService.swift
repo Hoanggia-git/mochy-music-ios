@@ -210,7 +210,7 @@ private enum EQTapMixFactory {
         let processor = EQTapProcessor()
         let retainedPtr = Unmanaged.passRetained(processor).toOpaque()
         var callbacks = MTAudioProcessingTapCallbacks(
-            version: kMTAudioProcessingTapCallbacksVersion_0,
+            version: Int32(kMTAudioProcessingTapCallbacksVersion_0),
             clientInfo: retainedPtr,
             init: { _, clientInfo, tapStorageOut in
                 tapStorageOut.pointee = clientInfo
@@ -242,7 +242,7 @@ private enum EQTapMixFactory {
         let status = MTAudioProcessingTapCreate(
             kCFAllocatorDefault,
             &callbacks,
-            kMTAudioProcessingTapCreationFlag_PostEffects,
+            MTAudioProcessingTapCreationFlags(kMTAudioProcessingTapCreationFlag_PostEffects),
             &tap
         )
         guard status == noErr, let createdTap = tap else {
