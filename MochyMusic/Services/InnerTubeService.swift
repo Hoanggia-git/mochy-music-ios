@@ -1185,7 +1185,8 @@ final class InnerTubeService: ObservableObject {
 
                 if client.useWebPoTokens && !attemptedPoToken {
                     attemptedPoToken = true
-                    let sessionKey = effectiveDataSyncId ?? (await visitorId(for: client)) ?? ""
+                    let fallbackVisitor = await visitorId(for: client)
+                    let sessionKey = effectiveDataSyncId ?? fallbackVisitor ?? ""
                     if !sessionKey.isEmpty {
                         cachedPoToken = await PoTokenService.shared.poToken(for: videoId, sessionId: sessionKey)
                     }
