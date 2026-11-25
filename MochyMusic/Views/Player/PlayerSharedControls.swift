@@ -202,3 +202,152 @@ struct PlayerTransportRow: View {
         }
     }
 }
+
+/// Mochy's StreamFormatBadge pill displaying stream codec/bitrate/sample-rate, source provider, or Offline badge.
+struct StreamFormatBadge: View {
+    let track: Track
+    let stream: ResolvedStream?
+    var accentColor: Color = .mochyPrimary
+    var onTap: () -> Void
+
+    @ObservedObject private var library = LibraryStore.shared
+    @ObservedObject private var settings = AppSettings.shared
+
+    private var badgeInfo: (format: String, source: String?, isLossless: Bool, isOffline: Bool)? {
+        guard !settings.hideAudioQualityBadge else { return nil }
+
+        let isLocalOrDownloaded = track.isLocal
+            || library.isDownloaded(track.id)
+            || stream?.sourceLabel == "Local File"
+            || stream?.sourceLabel == "Downloaded"
+
+        if let stream {
+            let fmt = stream.formattedBadge
+            let isLossless = fmt.localizedCaseInsensitiveContains("FLAC")
+                || fmt.localizedCaseInsensitiveContains("24-bit")
+                || fmt.localizedCaseInsensitiveContains("ALAC")
+            let src = (stream.sourceLabel == "Local File" || stream.sourceLabel == "Downloaded")
+                ? "Offline"
+                : stream.sourceLabel
+            return (fmt, src, isLossless, isLocalOrDownloaded)
+        }
+
+        if isLocalOrDownloaded {
+            return ("Offline", track.isLocal ? "Local" : "Downloaded", false, true)
+        }
+
+        return nil
+    }
+
+    var body: some View {
+        if let info = badgeInfo {
+            Button(action: {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                onTap()
+            }) {
+                HStack(spacing: 5) {
+                    Image(systemName: info.isOffline ? "arrow.down.circle.fill" : (info.isLossless ? "waveform.badge.magnifyingglass" : "hifispeaker.fill"))
+                        .font(.system(size: 9, weight: .bold))
+
+                    Text(info.format)
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+
+                    if let source = info.source, !source.isEmpty {
+                        Text("•")
+                            .font(.system(size: 9, weight: .bold))
+                            .opacity(0.6)
+                        Text(source)
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                }
+                .foregroundColor(info.isLossless ? .mochyTeal : (info.isOffline ? .mochyGreen : accentColor))
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule()
+                        .fill((info.isLossless ? Color.mochyTeal : (info.isOffline ? Color.mochyGreen : accentColor)).opacity(0.16))
+                )
+                .overlay(
+                    Capsule()
+                        .stroke((info.isLossless ? Color.mochyTeal : (info.isOffline ? Color.mochyGreen : accentColor)).opacity(0.35), lineWidth: 0.7)
+                )
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Stream quality \(info.format)")
+        }
+    }
+}
+
+/// Mochy's Like Burst heart button with expanding ring & radial spark particles on favorite.
+struct LikeBurstButton: View {
+    let isLiked: Bool
+    var accentColor: Color = .mochyRed
+    var size: CGFloat = 40
+    var onToggle: () -> Void
+
+    @State private var burstProgress: CGFloat = 0
+    @State private var showBurst: Bool = false
+    @State private var heartScale: CGFloat = 1.0
+
+    var body: some View {
+        Button {
+            let becomingLiked = !isLiked
+            UIImpactFeedbackGenerator(style: becomingLiked ? .medium : .light).impactOccurred()
+            onToggle()
+            triggerAnimation(becomingLiked: becomingLiked)
+        } label: {
+            ZStack {
+                if showBurst {
+                    Circle()
+                        .stroke(accentColor.opacity(Double(1.0 - burstProgress) * 0.8), lineWidth: 2)
+                        .frame(width: size * (0.9 + burstProgress * 0.9), height: size * (0.9 + burstProgress * 0.9))
+
+                    ForEach(0..<8, id: \.self) { idx in
+                        let angle = Double(idx) * (.pi / 4.0)
+                        let radius = Double(size) * (0.35 + Double(burstProgress) * 0.52)
+                        Circle()
+                            .fill(idx.isMultiple(of: 2) ? accentColor : Color.mochyPeach)
+                            .frame(width: 4.5 * (1.0 - burstProgress * 0.5), height: 4.5 * (1.0 - burstProgress * 0.5))
+                            .offset(
+                                x: CGFloat(cos(angle) * radius),
+                                y: CGFloat(sin(angle) * radius)
+                            )
+                            .opacity(Double(1.0 - burstProgress))
+                    }
+                }
+
+                Image(systemName: isLiked ? "heart.fill" : "heart")
+                    .font(.system(size: size * 0.52, weight: .semibold))
+                    .foregroundColor(isLiked ? accentColor : .white.opacity(0.8))
+                    .scaleEffect(heartScale)
+            }
+            .frame(width: size, height: size)
+            .background(Color.white.opacity(0.09))
+            .clipShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isLiked ? "Remove from Favorites" : "Add to Favorites")
+    }
+
+    private func triggerAnimation(becomingLiked: Bool) {
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.45)) {
+            heartScale = becomingLiked ? 1.28 : 0.88
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+                heartScale = 1.0
+            }
+        }
+
+        if becomingLiked {
+            burstProgress = 0
+            showBurst = true
+            withAnimation(.easeOut(duration: 0.48)) {
+                burstProgress = 1.0
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                showBurst = false
+            }
+        }
+    }
+}

@@ -171,6 +171,8 @@ struct MochySettingsScreen: View {
     @ObservedObject private var library = LibraryStore.shared
     @ObservedObject private var router = NavigationRouter.shared
     @ObservedObject private var scrobble = ScrobbleService.shared
+    @ObservedObject private var innerTube = InnerTubeService.shared
+    @ObservedObject private var discordRPC = DiscordRPCService.shared
 
     @State private var showLyricsSort = false
     @State private var showSetupWizard = false
@@ -262,6 +264,55 @@ struct MochySettingsScreen: View {
                 }
 
                 MochySettingsCard(title: "Thư viện, Đồng bộ & Tích hợp") {
+                    NavigationLink {
+                        YouTubeLoginScreen()
+                    } label: {
+                        MochySettingsNavRow(
+                            title: "Tài khoản YouTube Music",
+                            subtitle: innerTube.isSignedIn
+                                ? (settings.ytAccountHandle.isEmpty ? "Đã kết nối YouTube Music" : settings.ytAccountHandle)
+                                : "Đăng nhập để đồng bộ Bài hát đã thích & Playlist",
+                            icon: "play.rectangle.fill",
+                            tint: .mochyRed,
+                            trailingValue: innerTube.isSignedIn
+                                ? (settings.ytAccountName.isEmpty ? "Đã kết nối" : settings.ytAccountName)
+                                : "Đăng nhập"
+                        )
+                    }
+                    .buttonStyle(.plain)
+
+                    MochySettingsDivider()
+
+                    NavigationLink {
+                        ModulesScreen()
+                    } label: {
+                        MochySettingsNavRow(
+                            title: "Mô-đun nguồn phát (FLAC / JioSaavn)",
+                            subtitle: "Monochrome Lossless FLAC, JioSaavn AAC & Chẩn đoán",
+                            icon: "shippingbox.fill",
+                            tint: .mochyTeal,
+                            trailingValue: preferredSourceLabel
+                        )
+                    }
+                    .buttonStyle(.plain)
+
+                    MochySettingsDivider()
+
+                    NavigationLink {
+                        DiscordScreen()
+                    } label: {
+                        MochySettingsNavRow(
+                            title: "Discord Rich Presence",
+                            subtitle: "Hiển thị bài hát đang nghe trực tiếp trên Discord",
+                            icon: "bubble.left.and.exclamationmark.bubble.right.fill",
+                            tint: .mochyLavender,
+                            trailingValue: discordRPC.statusText
+                        )
+                    }
+                    .buttonStyle(.plain)
+
+                    MochySettingsDivider()
+
                     NavigationLink {
                         ImportSyncScreen()
                     } label: {
@@ -507,6 +558,14 @@ struct MochySettingsScreen: View {
                 }
             }
             .padding(14)
+        }
+    }
+
+    private var preferredSourceLabel: String {
+        switch settings.preferredAudioSource {
+        case "monochrome": return "Monochrome FLAC"
+        case "jiosaavn": return "JioSaavn AAC"
+        default: return "InnerTube"
         }
     }
 

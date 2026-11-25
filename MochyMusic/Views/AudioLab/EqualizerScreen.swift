@@ -77,6 +77,15 @@ struct EqualizerScreen: View {
                 Text(eq.isEnabled ? "Active • \(eq.currentPreset.name)" : "Bypassed")
                     .font(.system(size: 12))
                     .foregroundColor(.mochySecondary)
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(eq.isEnabled ? Color.mochyGreen : Color.mochySecondary)
+                        .frame(width: 6, height: 6)
+                    Text("Live on Stream + Local Audio (MTAudioProcessingTap)")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(eq.isEnabled ? .mochyGreen : .mochySecondary)
+                        .lineLimit(1)
+                }
             }
 
             Spacer()

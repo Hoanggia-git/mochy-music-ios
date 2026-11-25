@@ -222,6 +222,12 @@ struct ContentView: View {
             RecapScreen()
         case .nowPlaying:
             NowPlayingView()
+        case .youtubeLogin:
+            YouTubeLoginScreen()
+        case .discordSettings:
+            DiscordScreen()
+        case .modulesSettings:
+            ModulesScreen()
         }
     }
 }

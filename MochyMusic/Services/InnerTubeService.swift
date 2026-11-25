@@ -224,6 +224,39 @@ final class InnerTubeService: ObservableObject {
         config.timeoutIntervalForResource = 60
         config.httpShouldSetCookies = false
         self.session = URLSession(configuration: config)
+
+        let settings = AppSettings.shared
+        if !settings.ytInnerTubeCookie.isEmpty {
+            self.cookie = settings.ytInnerTubeCookie
+        }
+        if !settings.ytVisitorData.isEmpty {
+            self.visitorData = settings.ytVisitorData
+        }
+        if !settings.ytDataSyncId.isEmpty {
+            self.dataSyncId = settings.ytDataSyncId
+        }
+    }
+
+    private var effectiveCookie: String? {
+        if let cookie, !cookie.isEmpty { return cookie }
+        let stored = AppSettings.shared.ytInnerTubeCookie
+        return stored.isEmpty ? nil : stored
+    }
+
+    private var effectiveDataSyncId: String? {
+        if let dataSyncId, !dataSyncId.isEmpty { return dataSyncId }
+        let stored = AppSettings.shared.ytDataSyncId
+        return stored.isEmpty ? nil : stored
+    }
+
+    private var effectiveVisitorData: String? {
+        if let visitorData, !visitorData.isEmpty { return visitorData }
+        let stored = AppSettings.shared.ytVisitorData
+        return stored.isEmpty ? nil : stored
+    }
+
+    var isSignedIn: Bool {
+        effectiveCookie != nil
     }
 
     private var currentGL: String {
@@ -275,7 +308,7 @@ final class InnerTubeService: ObservableObject {
             }
             return try? await refreshVisitorId(for: client)
         }
-        if let existing = visitorData, !existing.isEmpty {
+        if let existing = effectiveVisitorData, !existing.isEmpty {
             return existing
         }
         return try? await refreshVisitorId(for: .webRemix)
@@ -907,7 +940,8 @@ final class InnerTubeService: ObservableObject {
         let json = try await performInnerTubeRequest(
             endpoint: "browse",
             client: .webRemix,
-            body: ["browseId": "FEmusic_history"]
+            body: ["browseId": "FEmusic_history"],
+            setLogin: true
         )
         let sectionContents = extractPrimarySectionContents(from: json)
         var sections: [HomeSection] = []
@@ -979,6 +1013,118 @@ final class InnerTubeService: ObservableObject {
         return nil
     }
 
+    // MARK: - YouTube Account & Library Sync
+
+    func fetchAccountInfo() async throws -> (name: String?, handle: String?, email: String?) {
+        let json = try await performInnerTubeRequest(
+            endpoint: "account/account_menu",
+            client: .webRemix,
+            body: [:],
+            setLogin: true
+        )
+
+        let actions = json["actions"] as? [[String: Any]] ?? []
+        let multiPageMenu = actions.first.flatMap {
+            dig($0, path: ["openPopupAction", "popup", "multiPageMenuRenderer"]) as? [String: Any]
+        }
+        let header = dig(multiPageMenu, path: ["header", "activeAccountHeaderRenderer"]) as? [String: Any]
+
+        let name = firstRunText(in: header?["accountName"])
+        let email = firstRunText(in: header?["email"])
+        let handle = firstRunText(in: header?["channelHandle"])
+
+        let settings = AppSettings.shared
+        if let name, !name.isEmpty { settings.ytAccountName = name }
+        if let email, !email.isEmpty { settings.ytAccountEmail = email }
+        if let handle, !handle.isEmpty { settings.ytAccountHandle = handle }
+
+        return (name, handle, email)
+    }
+
+    func fetchLikedSongs() async throws -> [Track] {
+        let json = try await performInnerTubeRequest(
+            endpoint: "browse",
+            client: .webRemix,
+            body: ["browseId": "FEmusic_liked_videos"],
+            setLogin: true
+        )
+
+        let twoColumn = dig(json, path: ["contents", "twoColumnBrowseResultsRenderer"]) as? [String: Any]
+        let tabs = twoColumn?["tabs"] as? [[String: Any]]
+            ?? (dig(json, path: ["contents", "singleColumnBrowseResultsRenderer", "tabs"]) as? [[String: Any]] ?? [])
+        let secondaryContents = dig(twoColumn, path: ["secondaryContents", "sectionListRenderer", "contents"]) as? [[String: Any]]
+        let singleContents = dig(tabs.first, path: ["tabRenderer", "content", "sectionListRenderer", "contents"]) as? [[String: Any]]
+
+        let shelf = (secondaryContents ?? singleContents ?? [])
+            .compactMap { ($0["musicPlaylistShelfRenderer"] as? [String: Any]) ?? ($0["musicShelfRenderer"] as? [String: Any]) }
+            .first
+
+        var tracks = (shelf?["contents"] as? [[String: Any]] ?? []).compactMap {
+            parseTrack(fromResponsive: $0["musicResponsiveListItemRenderer"] as? [String: Any])
+        }
+
+        var continuation = extractContinuation(from: shelf?["continuations"] as? [[String: Any]])
+            ?? extractContinuationFromItems(shelf?["contents"] as? [[String: Any]])
+
+        var seen = Set<String>()
+        var pageCount = 0
+        while let token = continuation, !seen.contains(token), pageCount < 15 {
+            seen.insert(token)
+            pageCount += 1
+            let page = try await fetchPlaylistContinuation(continuation: token)
+            tracks.append(contentsOf: page.tracks)
+            continuation = page.continuation
+        }
+
+        return tracks
+    }
+
+    func fetchLibraryPlaylists() async throws -> [YouTubePlaylist] {
+        let json = try await performInnerTubeRequest(
+            endpoint: "browse",
+            client: .webRemix,
+            body: ["browseId": "FEmusic_liked_playlists"],
+            setLogin: true
+        )
+
+        let sectionContents = extractPrimarySectionContents(from: json)
+        var playlists: [YouTubePlaylist] = []
+
+        for content in sectionContents {
+            if let grid = content["gridRenderer"] as? [String: Any],
+               let items = grid["items"] as? [[String: Any]] {
+                for item in items {
+                    if let twoRow = item["musicTwoRowItemRenderer"] as? [String: Any],
+                       let pl = parsePlaylist(fromTwoRow: twoRow) {
+                        playlists.append(pl)
+                    }
+                }
+            } else if let shelf = content["musicShelfRenderer"] as? [String: Any],
+                      let items = shelf["contents"] as? [[String: Any]] {
+                for item in items {
+                    if let responsive = item["musicResponsiveListItemRenderer"] as? [String: Any],
+                       let pl = parsePlaylist(fromResponsive: responsive) {
+                        playlists.append(pl)
+                    }
+                }
+            }
+        }
+        return playlists
+    }
+
+    func signOutYouTube() {
+        cookie = nil
+        visitorData = nil
+        dataSyncId = nil
+        let settings = AppSettings.shared
+        settings.ytInnerTubeCookie = ""
+        settings.ytVisitorData = ""
+        settings.ytDataSyncId = ""
+        settings.ytAccountName = ""
+        settings.ytAccountEmail = ""
+        settings.ytAccountHandle = ""
+    }
+
     // MARK: - Stream Resolution
 
     func resolveStream(videoId: String, quality: StreamQuality = AppSettings.shared.audioQuality) async throws -> ResolvedStream {
@@ -1034,6 +1180,7 @@ final class InnerTubeService: ObservableObject {
                     let formatLoudness = (selected["loudnessDb"] as? Double) ?? loudnessDb
                     let codecs = extractCodecs(from: mimeType)
 
+                    let kbps = max(48, bitrate / 1000)
                     return ResolvedStream(
                         url: streamURL,
                         userAgent: client.userAgent,
@@ -1044,7 +1191,9 @@ final class InnerTubeService: ObservableObject {
                         bitrate: bitrate,
                         sampleRate: sampleRate,
                         contentLength: contentLength,
-                        loudnessDb: formatLoudness
+                        loudnessDb: formatLoudness,
+                        sourceLabel: "YouTube Music",
+                        qualityBadgeText: "AAC · \(kbps) kbps"
                     )
                 }
 
@@ -1061,7 +1210,9 @@ final class InnerTubeService: ObservableObject {
                         bitrate: 128_000,
                         sampleRate: 44100,
                         contentLength: 0,
-                        loudnessDb: loudnessDb
+                        loudnessDb: loudnessDb,
+                        sourceLabel: "YouTube Music",
+                        qualityBadgeText: "HLS · Auto"
                     )
                 }
 
@@ -1077,6 +1228,7 @@ final class InnerTubeService: ObservableObject {
                 if let selected = muxedMP4.max(by: { ($0["bitrate"] as? Int ?? 0) < ($1["bitrate"] as? Int ?? 0) }),
                    let urlString = selected["url"] as? String,
                    let streamURL = URL(string: urlString) {
+                    let muxBitrate = selected["bitrate"] as? Int ?? 128_000
                     return ResolvedStream(
                         url: streamURL,
                         userAgent: client.userAgent,
@@ -1084,10 +1236,12 @@ final class InnerTubeService: ObservableObject {
                         itag: selected["itag"] as? Int ?? 18,
                         mimeType: "video/mp4",
                         codecs: "mp4a.40.2",
-                        bitrate: selected["bitrate"] as? Int ?? 128_000,
+                        bitrate: muxBitrate,
                         sampleRate: 44100,
                         contentLength: (selected["contentLength"] as? String).flatMap(Int64.init) ?? 0,
-                        loudnessDb: loudnessDb
+                        loudnessDb: loudnessDb,
+                        sourceLabel: "YouTube Music",
+                        qualityBadgeText: "AAC · \(max(48, muxBitrate / 1000)) kbps"
                     )
                 }
             } catch {
@@ -1104,7 +1258,7 @@ final class InnerTubeService: ObservableObject {
             throw InnerTubeError.invalidURL
         }
         let body: [String: Any] = [
-            "context": client.contextPayload(gl: currentGL, hl: currentHL, visitorData: visitor, dataSyncId: dataSyncId),
+            "context": client.contextPayload(gl: currentGL, hl: currentHL, visitorData: visitor, dataSyncId: effectiveDataSyncId),
             "videoId": videoId,
             "contentCheckOk": true,
             "racyCheckOk": true
@@ -1144,7 +1298,8 @@ final class InnerTubeService: ObservableObject {
         endpoint: String,
         client: ClientProfile,
         queryItems: [URLQueryItem] = [],
-        body: [String: Any]
+        body: [String: Any],
+        setLogin: Bool = false
     ) async throws -> [String: Any] {
         if AppSettings.shared.offlineMode {
             throw InnerTubeError.offlineMode
@@ -1160,22 +1315,24 @@ final class InnerTubeService: ObservableObject {
         }
 
         let visitor = await visitorId(for: client)
+        let shouldLogin = setLogin || effectiveCookie != nil
         var fullBody = body
         fullBody["context"] = client.contextPayload(
             gl: currentGL,
             hl: currentHL,
             visitorData: visitor,
-            dataSyncId: dataSyncId
+            dataSyncId: shouldLogin ? effectiveDataSyncId : nil
         )
 
-        return try await postJSON(url: url, client: client, body: fullBody, visitorOverride: visitor)
+        return try await postJSON(url: url, client: client, body: fullBody, visitorOverride: visitor, setLogin: shouldLogin)
     }
 
     private func postJSON(
         url: URL,
         client: ClientProfile,
         body: [String: Any],
-        visitorOverride: String?
+        visitorOverride: String?,
+        setLogin: Bool = true
     ) async throws -> [String: Any] {
         let dataBody = try JSONSerialization.data(withJSONObject: body)
         var request = URLRequest(url: url)
@@ -1198,7 +1355,7 @@ final class InnerTubeService: ObservableObject {
             request.setValue(visitor, forHTTPHeaderField: "X-Goog-Visitor-Id")
         }
 
-        if client.loginSupported, let cookie, !cookie.isEmpty {
+        if setLogin, client.loginSupported, let cookie = effectiveCookie, !cookie.isEmpty {
             request.setValue(cookie, forHTTPHeaderField: "Cookie")
             if let authHeader = sapisidAuthHeader(cookie: cookie, origin: client.apiOrigin) {
                 request.setValue(authHeader, forHTTPHeaderField: "Authorization")

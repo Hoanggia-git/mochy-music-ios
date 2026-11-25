@@ -131,7 +131,7 @@ struct AudioLabScreen: View {
                         Text("10-Band Equalizer")
                             .font(.system(size: 16, weight: .bold))
                             .foregroundColor(.mochyOnSurface)
-                        Text(eq.isEnabled ? "Active • \(eq.currentPreset.name)" : "Tap to configure EQ & AutoEQ presets")
+                        Text(eq.isEnabled ? "Active • \(eq.currentPreset.name) • Live on Stream + Local" : "Live DSP via MTAudioProcessingTap • Tap to configure")
                             .font(.system(size: 12))
                             .foregroundColor(.mochySecondary)
                     }

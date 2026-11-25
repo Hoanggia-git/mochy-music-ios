@@ -1,5 +1,7 @@
 import Foundation
 import AVFoundation
+import MediaToolbox
+import os
 
 struct EQPreset: Identifiable, Codable, Hashable {
     let id: String
@@ -31,7 +33,205 @@ struct EQPreset: Identifiable, Codable, Hashable {
     ]
 }
 
-/// AVAudioEngine-based 10-band parametric equalizer, reverb, pitch shift, and bass boost service.
+// MARK: - Real-Time Thread-Safe DSP Snapshot & Biquad Tap Processor
+
+private struct EQDSPParameters {
+    var isEnabled: Bool = false
+    var effectiveGains: [Float] = Array(repeating: 0, count: 10)
+    var version: UInt64 = 0
+}
+
+private final class EQDSPParameterStore {
+    static let shared = EQDSPParameterStore()
+
+    private let lockPtr: UnsafeMutablePointer<os_unfair_lock_s>
+    private var params = EQDSPParameters()
+
+    private init() {
+        lockPtr = UnsafeMutablePointer<os_unfair_lock_s>.allocate(capacity: 1)
+        lockPtr.initialize(to: os_unfair_lock())
+    }
+
+    deinit {
+        lockPtr.deinitialize(count: 1)
+        lockPtr.deallocate()
+    }
+
+    func update(isEnabled: Bool, gains: [Float]) {
+        os_unfair_lock_lock(lockPtr)
+        params.isEnabled = isEnabled
+        params.effectiveGains = gains
+        params.version &+= 1
+        os_unfair_lock_unlock(lockPtr)
+    }
+
+    func snapshot() -> EQDSPParameters {
+        os_unfair_lock_lock(lockPtr)
+        let copy = params
+        os_unfair_lock_unlock(lockPtr)
+        return copy
+    }
+}
+
+private final class EQTapProcessor {
+    private struct BiquadCoeffs {
+        var b0: Float = 1
+        var b1: Float = 0
+        var b2: Float = 0
+        var a1: Float = 0
+        var a2: Float = 0
+    }
+
+    private let maxChannels = 8
+    private let bandCount = 10
+    private var sampleRate: Float = 44100
+    private var channels: Int = 2
+    private var isFloatPCM: Bool = true
+    private var isNonInterleaved: Bool = true
+    private var lastVersion: UInt64 = .max
+    private var enabled: Bool = false
+
+    private var coeffs: [BiquadCoeffs]
+    private var z1: [Float]
+    private var z2: [Float]
+
+    init() {
+        self.coeffs = Array(repeating: BiquadCoeffs(), count: bandCount)
+        self.z1 = Array(repeating: 0, count: bandCount * maxChannels)
+        self.z2 = Array(repeating: 0, count: bandCount * maxChannels)
+    }
+
+    func prepare(sampleRate: Float, channels: Int, formatFlags: AudioFormatFlags) {
+        self.sampleRate = sampleRate > 0 ? sampleRate : 44100
+        self.channels = max(1, min(maxChannels, channels))
+        self.isFloatPCM = (formatFlags & kAudioFormatFlagIsFloat) != 0
+        self.isNonInterleaved = (formatFlags & kAudioFormatFlagIsNonInterleaved) != 0
+        self.lastVersion = .max
+        for i in 0..<z1.count {
+            z1[i] = 0
+            z2[i] = 0
+        }
+    }
+
+    func process(bufferList: UnsafeMutablePointer<AudioBufferList>, frameCount: Int) {
+        guard isFloatPCM, frameCount > 0 else { return }
+
+        let snapshot = EQDSPParameterStore.shared.snapshot()
+        enabled = snapshot.isEnabled
+        guard enabled else { return }
+
+        if snapshot.version != lastVersion {
+            lastVersion = snapshot.version
+            recomputeCoefficients(gains: snapshot.effectiveGains)
+        }
+
+        let abl = UnsafeMutableAudioBufferListPointer(bufferList)
+        if isNonInterleaved {
+            let activeChannels = min(abl.count, channels)
+            for ch in 0..<activeChannels {
+                guard let rawPtr = abl[ch].mData else { continue }
+                let samples = rawPtr.assumingMemoryBound(to: Float.self)
+                processChannel(samples: samples, frameCount: frameCount, stride: 1, channelIndex: ch)
+            }
+        } else if let first = abl.first, let rawPtr = first.mData {
+            let samples = rawPtr.assumingMemoryBound(to: Float.self)
+            for ch in 0..<channels {
+                processChannel(samples: samples + ch, frameCount: frameCount, stride: channels, channelIndex: ch)
+            }
+        }
+    }
+
+    private func processChannel(samples: UnsafeMutablePointer<Float>, frameCount: Int, stride: Int, channelIndex: Int) {
+        for band in 0..<bandCount {
+            let c = coeffs[band]
+            // Unity passthrough optimization when band gain is effectively 0 dB
+            if abs(c.b0 - 1.0) < 1e-6 && abs(c.b1) < 1e-6 && abs(c.b2) < 1e-6 {
+                continue
+            }
+            let stateIdx = band * maxChannels + channelIndex
+            var s1 = z1[stateIdx]
+            var s2 = z2[stateIdx]
+            var sampleOffset = 0
+            for _ in 0..<frameCount {
+                let x = samples[sampleOffset]
+                let y = c.b0 * x + s1
+                s1 = c.b1 * x - c.a1 * y + s2
+                s2 = c.b2 * x - c.a2 * y
+                samples[sampleOffset] = max(-1.0, min(1.0, y))
+                sampleOffset += stride
+            }
+            z1[stateIdx] = s1
+            z2[stateIdx] = s2
+        }
+    }
+
+    private func recomputeCoefficients(gains: [Float]) {
+        let q: Float = 1.414
+        let freqs = EQPreset.bandFrequencies
+        for i in 0..<bandCount {
+            let gainDb = i < gains.count ? gains[i] : 0
+            let freq = freqs[i]
+            if abs(gainDb) < 0.05 || freq >= sampleRate * 0.45 {
+                coeffs[i] = BiquadCoeffs()
+                continue
+            }
+            let a = powf(10.0, gainDb / 40.0)
+            let omega = 2.0 * Float.pi * freq / sampleRate
+            let sn = sinf(omega)
+            let cs = cosf(omega)
+            let alpha = sn / (2.0 * q)
+
+            let b0 = 1.0 + alpha * a
+            let b1 = -2.0 * cs
+            let b2 = 1.0 - alpha * a
+            let a0 = 1.0 + alpha / a
+            let a1 = -2.0 * cs
+            let a2 = 1.0 - alpha / a
+
+            let invA0 = 1.0 / a0
+            coeffs[i] = BiquadCoeffs(
+                b0: b0 * invA0,
+                b1: b1 * invA0,
+                b2: b2 * invA0,
+                a1: a1 * invA0,
+                a2: a2 * invA0
+            )
+        }
+    }
+}
+
+private let eqTapInitCallback: MTAudioProcessingTapInitCallback = { _, clientInfo, tapStorageOut in
+    tapStorageOut.pointee = clientInfo
+}
+
+private let eqTapFinalizeCallback: MTAudioProcessingTapFinalizeCallback = { tap in
+    let storage = MTAudioProcessingTapGetStorage(tap)
+    Unmanaged<EQTapProcessor>.fromOpaque(storage).release()
+}
+
+private let eqTapPrepareCallback: MTAudioProcessingTapPrepareCallback = { tap, _, processingFormat in
+    let storage = MTAudioProcessingTapGetStorage(tap)
+    let processor = Unmanaged<EQTapProcessor>.fromOpaque(storage).takeUnretainedValue()
+    processor.prepare(
+        sampleRate: Float(processingFormat.pointee.mSampleRate),
+        channels: Int(processingFormat.pointee.mChannelsPerFrame),
+        formatFlags: processingFormat.pointee.mFormatFlags
+    )
+}
+
+private let eqTapUnprepareCallback: MTAudioProcessingTapUnprepareCallback = { _ in }
+
+private let eqTapProcessCallback: MTAudioProcessingTapProcessCallback = { tap, numberFrames, _, bufferListInOut, numberFramesOut, flagsOut in
+    let status = MTAudioProcessingTapGetSourceAudio(tap, numberFrames, bufferListInOut, flagsOut, nil, numberFramesOut)
+    guard status == noErr else { return }
+    let storage = MTAudioProcessingTapGetStorage(tap)
+    let processor = Unmanaged<EQTapProcessor>.fromOpaque(storage).takeUnretainedValue()
+    processor.process(bufferList: bufferListInOut, frameCount: Int(numberFramesOut.pointee))
+}
+
+// MARK: - EqualizerService
+
+/// AVAudioEngine + MTAudioProcessingTap 10-band parametric equalizer, reverb, pitch shift, and bass boost service.
 @MainActor
 final class EqualizerService: ObservableObject {
     static let shared = EqualizerService()
@@ -173,6 +373,45 @@ final class EqualizerService: ObservableObject {
         }
     }
 
+    // MARK: - AVPlayer Real-Time AudioMix Tap
+
+    func createAudioMix(for asset: AVAsset) async -> AVAudioMix? {
+        guard let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first else {
+            return nil
+        }
+
+        let processor = EQTapProcessor()
+        let retainedPtr = Unmanaged.passRetained(processor).toOpaque()
+        var callbacks = MTAudioProcessingTapCallbacks(
+            version: kMTAudioProcessingTapCallbacksVersion_0,
+            clientInfo: retainedPtr,
+            init: eqTapInitCallback,
+            finalize: eqTapFinalizeCallback,
+            prepare: eqTapPrepareCallback,
+            unprepare: eqTapUnprepareCallback,
+            process: eqTapProcessCallback
+        )
+
+        var tap: MTAudioProcessingTap?
+        let status = MTAudioProcessingTapCreate(
+            kCFAllocatorDefault,
+            &callbacks,
+            kMTAudioProcessingTapCreationFlag_PostEffects,
+            &tap
+        )
+        guard status == noErr, let createdTap = tap else {
+            Unmanaged<EQTapProcessor>.fromOpaque(retainedPtr).release()
+            return nil
+        }
+
+        let inputParams = AVMutableAudioMixInputParameters(track: audioTrack)
+        inputParams.audioTapProcessor = createdTap
+
+        let audioMix = AVMutableAudioMix()
+        audioMix.inputParameters = [inputParams]
+        return audioMix
+    }
+
     // MARK: - AVAudioEngine Graph Setup & Live DSP Application
 
     private func configureAudioGraph() {
@@ -201,17 +440,22 @@ final class EqualizerService: ObservableObject {
 
     func applyEngineParameters() {
         eqNode.bypass = !isEnabled
+        var effectiveGains = Array(repeating: Float(0), count: 10)
+        let bassOffsets: [Float] = [5.0, 4.0, 2.5]
+
         for (index, rawGain) in bands.enumerated() where index < eqNode.bands.count {
             var gain = rawGain
             if bassBoostEnabled && index <= 2 {
-                let boost: [Float] = [5.0, 4.0, 2.5]
-                gain = min(12.0, gain + boost[index])
+                gain = min(12.0, gain + bassOffsets[index])
             }
+            effectiveGains[index] = gain
             eqNode.bands[index].gain = isEnabled ? gain : 0
         }
 
         reverbNode.wetDryMix = isEnabled ? max(0, min(100, reverbMix)) : 0
         timePitchNode.pitch = isEnabled ? max(-1200, min(1200, pitchShiftCents)) : 0
+
+        EQDSPParameterStore.shared.update(isEnabled: isEnabled, gains: effectiveGains)
     }
 
     func startEngineIfNeeded() throws {

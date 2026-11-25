@@ -162,36 +162,29 @@ struct FlagshipPlayerView: View {
                     }
                 }
 
-                HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 6) {
                     Text(track.artistsText)
                         .font(.system(size: 15 * settings.fontSizePreset.scale, weight: .medium))
                         .foregroundColor(.white.opacity(0.75))
                         .lineLimit(1)
 
-                    if !settings.hideAudioQualityBadge, let stream = player.currentStream {
-                        Text(stream.bitrate > 180_000 ? "HQ" : "AAC")
-                            .font(.system(size: 9, weight: .bold, design: .monospaced))
-                            .foregroundColor(accentTint)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(accentTint.opacity(0.18))
-                            .clipShape(Capsule())
-                    }
+                    StreamFormatBadge(
+                        track: track,
+                        stream: player.currentStream,
+                        accentColor: accentTint,
+                        onTap: handlers.onOpenAudioLab
+                    )
                 }
             }
 
             Spacer(minLength: 8)
 
-            Button {
-                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            LikeBurstButton(
+                isLiked: library.isFavorite(track),
+                accentColor: .mochyRed,
+                size: 40
+            ) {
                 library.toggleFavorite(track)
-            } label: {
-                Image(systemName: library.isFavorite(track) ? "heart.fill" : "heart")
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundColor(library.isFavorite(track) ? .mochyRed : .white.opacity(0.8))
-                    .frame(width: 40, height: 40)
-                    .background(Color.white.opacity(0.09))
-                    .clipShape(Circle())
             }
 
             Button(action: handlers.onOpenMenu) {

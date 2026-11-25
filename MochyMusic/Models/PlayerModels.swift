@@ -79,7 +79,7 @@ enum StreamQuality: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-/// Resolved playable stream returned by `InnerTubeService.resolveStream`.
+/// Resolved playable stream returned by `InnerTubeService`, `MonochromeService`, or `JioSaavnService`.
 struct ResolvedStream: Codable, Hashable {
     var url: URL
     var userAgent: String?
@@ -91,6 +91,8 @@ struct ResolvedStream: Codable, Hashable {
     var sampleRate: Int?
     var contentLength: Int64
     var loudnessDb: Double?
+    var sourceLabel: String?
+    var qualityBadgeText: String?
 
     init(
         url: URL,
@@ -102,7 +104,9 @@ struct ResolvedStream: Codable, Hashable {
         bitrate: Int = 128_000,
         sampleRate: Int? = 44100,
         contentLength: Int64 = 0,
-        loudnessDb: Double? = nil
+        loudnessDb: Double? = nil,
+        sourceLabel: String? = nil,
+        qualityBadgeText: String? = nil
     ) {
         self.url = url
         self.userAgent = userAgent
@@ -114,6 +118,26 @@ struct ResolvedStream: Codable, Hashable {
         self.sampleRate = sampleRate
         self.contentLength = contentLength
         self.loudnessDb = loudnessDb
+        self.sourceLabel = sourceLabel
+        self.qualityBadgeText = qualityBadgeText
+    }
+
+    var formattedBadge: String {
+        if let qualityBadgeText, !qualityBadgeText.isEmpty {
+            return qualityBadgeText
+        }
+        let kbps = bitrate > 0 ? "\(bitrate / 1000) kbps" : ""
+        let codecName: String
+        if mimeType.lowercased().contains("flac") || codecs.lowercased().contains("flac") {
+            codecName = "FLAC"
+        } else if mimeType.lowercased().contains("mp4") || codecs.lowercased().contains("mp4a") {
+            codecName = "AAC"
+        } else if url.pathExtension.lowercased() == "m3u8" {
+            codecName = "HLS"
+        } else {
+            codecName = "AUDIO"
+        }
+        return kbps.isEmpty ? codecName : "\(codecName) · \(kbps)"
     }
 }
 

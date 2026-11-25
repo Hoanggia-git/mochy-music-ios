@@ -160,6 +160,33 @@ final class LyricsManager: ObservableObject {
                 album: album,
                 durationSeconds: track.durationSeconds
             )
+        case .simpMusic:
+            return try await SimpMusicLyricsService.shared.fetchLyrics(
+                videoId: track.id,
+                durationSeconds: track.durationSeconds
+            )
+        case .youLyPlus:
+            return try await YouLyPlusLyricsService.shared.fetchLyrics(
+                videoId: track.id,
+                title: track.title,
+                artist: artist,
+                album: album,
+                durationSeconds: track.durationSeconds
+            )
+        case .paxsenix:
+            return try await PaxsenixLyricsService.shared.fetchLyrics(
+                title: track.title,
+                artist: artist,
+                album: album,
+                durationSeconds: track.durationSeconds
+            )
+        case .kugou:
+            return try await KuGouLyricsService.shared.fetchLyrics(
+                title: track.title,
+                artist: artist,
+                album: album,
+                durationSeconds: track.durationSeconds
+            )
         case .musixmatch:
             return try await MusixmatchService.shared.fetchLyrics(
                 title: track.title,
@@ -171,75 +198,14 @@ final class LyricsManager: ObservableObject {
                 title: track.title,
                 artist: artist
             )
-        case .youLyPlus:
-            return try await fetchYouLyPlus(track: track, artist: artist, album: album)
-        case .simpMusic:
-            return try await fetchSimpMusic(videoId: track.id)
-        case .kugou, .paxsenix, .netEase, .qqMusic, .deezer, .lrcRed, .unison:
+        case .lrcRed:
+            return try await LrcRedLyricsService.shared.fetchLyrics(
+                title: track.title,
+                artist: artist,
+                durationSeconds: track.durationSeconds
+            )
+        case .netEase, .qqMusic, .deezer, .unison:
             return nil
         }
-    }
-
-    private func fetchYouLyPlus(track: Track, artist: String, album: String?) async throws -> LyricsResult? {
-        guard var components = URLComponents(string: "https://lyricsplus.binimum.org/v2/lyrics/get") else {
-            return nil
-        }
-        var items = [
-            URLQueryItem(name: "title", value: LrcLibService.cleanTitle(track.title)),
-            URLQueryItem(name: "artist", value: LrcLibService.cleanArtist(artist)),
-            URLQueryItem(name: "source", value: "apple,lyricsplus,musixmatch,spotify")
-        ]
-        if let album, !album.isEmpty {
-            items.append(URLQueryItem(name: "album", value: album))
-        }
-        if let duration = track.durationSeconds, duration > 0 {
-            items.append(URLQueryItem(name: "duration", value: String(duration)))
-        }
-        components.queryItems = items
-        guard let url = components.url else { return nil }
-
-        let (data, response) = try await URLSession.shared.data(from: url)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let rawLyrics = json["lyrics"] as? [[String: Any]] else {
-            return nil
-        }
-
-        let lines: [LyricLine] = rawLyrics.compactMap { entry in
-            guard let text = entry["text"] as? String, !text.isEmpty else { return nil }
-            let timeMs = entry["time"] as? Double ?? 0
-            return LyricLine(time: timeMs / 1000.0, text: text)
-        }
-        guard !lines.isEmpty else { return nil }
-        return LyricsResult(
-            syncedLines: lines,
-            plainText: lines.map(\.text).joined(separator: "\n"),
-            source: LyricsProvider.youLyPlus.displayName
-        )
-    }
-
-    private func fetchSimpMusic(videoId: String) async throws -> LyricsResult? {
-        guard let url = URL(string: "https://api-lyrics.simpmusic.org/v1/\(videoId)") else { return nil }
-        let (data, response) = try await URLSession.shared.data(from: url)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let entries = json["data"] as? [[String: Any]],
-              let first = entries.first else {
-            return nil
-        }
-        if let synced = first["syncedLyrics"] as? String, !synced.isEmpty {
-            let lines = LrcLibService.parseLRC(synced)
-            if !lines.isEmpty {
-                return LyricsResult(
-                    syncedLines: lines,
-                    plainText: (first["plainLyric"] as? String) ?? lines.map(\.text).joined(separator: "\n"),
-                    source: LyricsProvider.simpMusic.displayName
-                )
-            }
-        }
-        if let plain = first["plainLyric"] as? String, !plain.isEmpty {
-            return LyricsResult(syncedLines: nil, plainText: plain, source: LyricsProvider.simpMusic.displayName)
-        }
-        return nil
     }
 }

@@ -215,12 +215,24 @@ final class AudioPlayerManager: NSObject, ObservableObject {
         player.rate = playbackSpeed
         isPlaying = true
         updateNowPlayingInfo()
+        DiscordRPCService.shared.updatePresence(
+            track: currentTrack,
+            isPlaying: true,
+            currentTime: currentTime,
+            duration: duration
+        )
     }
 
     func pause() {
         player?.pause()
         isPlaying = false
         updateNowPlayingInfo()
+        DiscordRPCService.shared.updatePresence(
+            track: currentTrack,
+            isPlaying: false,
+            currentTime: currentTime,
+            duration: duration
+        )
     }
 
     func togglePlayPause() {
@@ -243,6 +255,7 @@ final class AudioPlayerManager: NSObject, ObservableObject {
         currentTime = 0
         duration = 0
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        DiscordRPCService.shared.updatePresence(track: nil, isPlaying: false, currentTime: 0, duration: 0)
     }
 
     func next() {
@@ -289,6 +302,12 @@ final class AudioPlayerManager: NSObject, ObservableObject {
         currentTime = clamped
         lastAccumulatedTime = clamped
         updateNowPlayingInfo()
+        DiscordRPCService.shared.updatePresence(
+            track: currentTrack,
+            isPlaying: isPlaying,
+            currentTime: clamped,
+            duration: duration
+        )
     }
 
     func skipForward(_ seconds: TimeInterval = 15) {
@@ -483,21 +502,42 @@ final class AudioPlayerManager: NSObject, ObservableObject {
             do {
                 let playerItem: AVPlayerItem
                 var resolvedLoudness: Double?
+                var isHLS = false
 
                 if let localURL = track.resolvedLocalURL, FileManager.default.fileExists(atPath: localURL.path) {
-                    playerItem = AVPlayerItem(url: localURL)
-                    self.currentStream = nil
-                } else if let downloadedURL = LibraryStore.shared.localFileURL(forTrackId: track.id) {
-                    playerItem = AVPlayerItem(url: downloadedURL)
-                    self.currentStream = nil
-                } else {
-                    let stream = try await InnerTubeService.shared.resolveStream(
-                        videoId: track.id,
-                        quality: AppSettings.shared.audioQuality
+                    let asset = AVURLAsset(url: localURL)
+                    playerItem = AVPlayerItem(asset: asset)
+                    if let mix = await EqualizerService.shared.createAudioMix(for: asset) {
+                        playerItem.audioMix = mix
+                    }
+                    self.currentStream = ResolvedStream(
+                        url: localURL,
+                        isAudioOnly: true,
+                        mimeType: "audio/mp4",
+                        codecs: localURL.pathExtension.lowercased(),
+                        sourceLabel: "Local File",
+                        qualityBadgeText: localURL.pathExtension.uppercased()
                     )
+                } else if let downloadedURL = LibraryStore.shared.localFileURL(forTrackId: track.id) {
+                    let asset = AVURLAsset(url: downloadedURL)
+                    playerItem = AVPlayerItem(asset: asset)
+                    if let mix = await EqualizerService.shared.createAudioMix(for: asset) {
+                        playerItem.audioMix = mix
+                    }
+                    self.currentStream = ResolvedStream(
+                        url: downloadedURL,
+                        isAudioOnly: true,
+                        mimeType: "audio/mp4",
+                        codecs: downloadedURL.pathExtension.lowercased(),
+                        sourceLabel: "Downloaded",
+                        qualityBadgeText: "Offline · AAC"
+                    )
+                } else {
+                    let stream = try await self.resolveStreamWithPreferredSource(for: track)
                     if Task.isCancelled { return }
                     self.currentStream = stream
                     resolvedLoudness = stream.loudnessDb
+                    isHLS = stream.mimeType.lowercased().contains("mpegurl") || stream.url.pathExtension.lowercased() == "m3u8"
 
                     var headers: [String: String] = [:]
                     if let ua = stream.userAgent {
@@ -508,6 +548,9 @@ final class AudioPlayerManager: NSObject, ObservableObject {
                         options: headers.isEmpty ? nil : ["AVURLAssetHTTPHeaderFieldsKey": headers]
                     )
                     playerItem = AVPlayerItem(asset: asset)
+                    if !isHLS, let mix = await EqualizerService.shared.createAudioMix(for: asset) {
+                        playerItem.audioMix = mix
+                    }
                 }
 
                 if Task.isCancelled { return }
@@ -552,6 +595,12 @@ final class AudioPlayerManager: NSObject, ObservableObject {
 
                 self.updateNowPlayingInfo()
                 self.loadArtworkForNowPlaying(track: track)
+                DiscordRPCService.shared.updatePresence(
+                    track: track,
+                    isPlaying: true,
+                    currentTime: 0,
+                    duration: self.duration
+                )
             } catch {
                 if Task.isCancelled { return }
                 self.isLoading = false
@@ -565,6 +614,31 @@ final class AudioPlayerManager: NSObject, ObservableObject {
                 }
             }
         }
+    }
+
+    private func resolveStreamWithPreferredSource(for track: Track) async throws -> ResolvedStream {
+        let settings = AppSettings.shared
+        let source = settings.preferredAudioSource.lowercased()
+        let quality = settings.audioQuality
+
+        if source == "monochrome" && settings.monochromeEnabled {
+            if let stream = try? await MonochromeService.shared.resolveStream(for: track) {
+                return stream
+            }
+        } else if source == "jiosaavn" && settings.jiosaavnEnabled {
+            if let stream = try? await JioSaavnService.shared.resolveStream(for: track, quality: settings.jiosaavnQuality) {
+                return stream
+            }
+        } else if settings.monochromeEnabled && (quality == .lossless || quality == .hiResLossless) {
+            if let stream = try? await MonochromeService.shared.resolveStream(for: track) {
+                return stream
+            }
+        }
+
+        return try await InnerTubeService.shared.resolveStream(
+            videoId: track.id,
+            quality: quality
+        )
     }
 
     private func normalizedVolume(loudnessDb: Double?) -> Float {

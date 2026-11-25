@@ -3,6 +3,8 @@ import SwiftUI
 struct IntegrationsScreen: View {
     @ObservedObject private var settings = AppSettings.shared
     @ObservedObject private var scrobble = ScrobbleService.shared
+    @ObservedObject private var innerTube = InnerTubeService.shared
+    @ObservedObject private var discordRPC = DiscordRPCService.shared
 
     @State private var showLastFmLogin = false
     @State private var showRecognitionSheet = false
@@ -17,6 +19,7 @@ struct IntegrationsScreen: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 18) {
+                youtubeMusicSection
                 lastFmSection
                 discordSection
                 shazamSection
@@ -34,6 +37,49 @@ struct IntegrationsScreen: View {
         }
         .sheet(isPresented: $showLastFmLogin) {
             lastFmAuthSheet
+        }
+    }
+
+    // MARK: - YouTube Music Sync
+
+    private var youtubeMusicSection: some View {
+        MochySettingsCard(title: "YouTube Music Account & Sync") {
+            NavigationLink {
+                YouTubeLoginScreen()
+            } label: {
+                MochySettingsNavRow(
+                    title: innerTube.isSignedIn
+                        ? (settings.ytAccountName.isEmpty ? "Tài khoản YouTube Music" : settings.ytAccountName)
+                        : "Đăng nhập YouTube Music",
+                    subtitle: innerTube.isSignedIn
+                        ? (settings.ytAccountHandle.isEmpty ? "Đã kết nối phiên SAPISIDHASH" : settings.ytAccountHandle)
+                        : "Đồng bộ Bài hát đã thích & Playlist từ YouTube Music",
+                    icon: "play.rectangle.fill",
+                    tint: .mochyRed,
+                    trailingValue: innerTube.isSignedIn ? "Đã kết nối" : "Đăng nhập"
+                )
+            }
+            .buttonStyle(.plain)
+
+            MochySettingsDivider()
+
+            MochySettingsToggleRow(
+                title: "Đồng bộ thư viện YouTube Music",
+                subtitle: "Tự động hiển thị Liked Songs & Library Playlists",
+                icon: "arrow.triangle.2.circlepath",
+                tint: .mochyRed,
+                isOn: $settings.ytmSync
+            )
+
+            MochySettingsDivider()
+
+            MochySettingsToggleRow(
+                title: "Đồng bộ bài hát đã thích",
+                subtitle: "Tải danh sách FEmusic_liked_videos khi đăng nhập",
+                icon: "heart.circle.fill",
+                tint: .mochyPink,
+                isOn: $settings.ytSyncLikedSongs
+            )
         }
     }
 
@@ -123,22 +169,37 @@ struct IntegrationsScreen: View {
 
     private var discordSection: some View {
         MochySettingsCard(title: "Discord Rich Presence") {
-            MochySettingsToggleRow(
-                title: "Hiển thị trạng thái trên Discord",
-                subtitle: "Chia sẻ bài hát đang nghe (Listening to...) qua RPC",
-                icon: "bubble.left.and.exclamationmark.bubble.right.fill",
-                tint: .mochyLavender,
-                isOn: $settings.discordRPCEnabled
-            )
+            NavigationLink {
+                DiscordScreen()
+            } label: {
+                MochySettingsNavRow(
+                    title: "Cấu hình & Xem trước Discord RPC",
+                    subtitle: "Gateway v9 • Token, loại hoạt động & thẻ xem trước",
+                    icon: "bubble.left.and.exclamationmark.bubble.right.fill",
+                    tint: .mochyLavender,
+                    trailingValue: discordRPC.statusText
+                )
+            }
+            .buttonStyle(.plain)
 
             MochySettingsDivider()
 
             MochySettingsToggleRow(
-                title: "Xóa trạng thái khi tạm dừng",
-                subtitle: "Ẩn Rich Presence ngay khi bạn nhấn Pause",
-                icon: "pause.circle.fill",
-                tint: .mochySecondary,
-                isOn: $settings.discordClearOnPause
+                title: "Hiển thị trạng thái trên Discord",
+                subtitle: "Chia sẻ bài hát đang nghe (Listening to...) qua RPC",
+                icon: "bolt.horizontal.circle.fill",
+                tint: .mochyLavender,
+                isOn: Binding(
+                    get: { settings.discordRPCEnabled },
+                    set: { enabled in
+                        settings.discordRPCEnabled = enabled
+                        if enabled {
+                            discordRPC.connectIfNeeded()
+                        } else {
+                            discordRPC.disconnect()
+                        }
+                    }
+                )
             )
         }
     }
@@ -162,10 +223,39 @@ struct IntegrationsScreen: View {
         }
     }
 
-    // MARK: - Built-in Modules
+    // MARK: - Built-in & Audio Source Modules
 
     private var builtInModulesSection: some View {
-        MochySettingsCard(title: "Mô-đun tích hợp sẵn (Built-in Modules)") {
+        MochySettingsCard(title: "Mô-đun nguồn phát & Lời bài hát") {
+            NavigationLink {
+                ModulesScreen()
+            } label: {
+                MochySettingsNavRow(
+                    title: "Quản lý Mô-đun nguồn phát",
+                    subtitle: "Monochrome FLAC, JioSaavn AAC & Chẩn đoán luồng",
+                    icon: "shippingbox.fill",
+                    tint: .mochyTeal,
+                    trailingValue: settings.preferredAudioSource.capitalized
+                )
+            }
+            .buttonStyle(.plain)
+
+            MochySettingsDivider()
+
+            moduleRow(
+                name: "Monochrome FLAC",
+                description: "\(MonochromeService.shared.servers.count) máy chủ Lossless / Hi-Res",
+                status: settings.monochromeEnabled ? "Đã bật" : "Tắt",
+                tint: settings.monochromeEnabled ? .mochyTeal : .mochySecondary
+            )
+            MochySettingsDivider()
+            moduleRow(
+                name: "JioSaavn AAC",
+                description: "Luồng AAC \(settings.jiosaavnQuality) kbps giải mã DES",
+                status: settings.jiosaavnEnabled ? "Đã bật" : "Tắt",
+                tint: settings.jiosaavnEnabled ? .mochyGreen : .mochySecondary
+            )
+            MochySettingsDivider()
             moduleRow(
                 name: "InnerTube Engine",
                 description: "YouTube Music / iOS / AndroidVR API gốc",
@@ -188,17 +278,10 @@ struct IntegrationsScreen: View {
             )
             MochySettingsDivider()
             moduleRow(
-                name: "Genius",
-                description: "Lời bài hát đầy đủ & thông tin sáng tác",
-                status: settings.enableGenius ? "Đã bật" : "Tắt",
-                tint: settings.enableGenius ? .mochyYellow : .mochySecondary
-            )
-            MochySettingsDivider()
-            moduleRow(
-                name: "Musixmatch",
-                description: "Cơ sở dữ liệu lời bài hát đa ngôn ngữ",
-                status: settings.enableMusixmatch ? "Đã bật" : "Tắt",
-                tint: settings.enableMusixmatch ? .mochyPeach : .mochySecondary
+                name: "Genius & Musixmatch",
+                description: "Lời bài hát đầy đủ & đa ngôn ngữ",
+                status: (settings.enableGenius || settings.enableMusixmatch) ? "Đã bật" : "Tắt",
+                tint: (settings.enableGenius || settings.enableMusixmatch) ? .mochyYellow : .mochySecondary
             )
         }
     }

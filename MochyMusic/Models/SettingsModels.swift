@@ -301,6 +301,25 @@ final class AppSettings: ObservableObject {
     @AppStorage("discordRPCEnable") var discordRPCEnabled: Bool = false
     @AppStorage("discordPresenceClearOnPause") var discordClearOnPause: Bool = true
     @AppStorage("discordActivityType") var discordActivityType: String = "LISTENING"
+    @AppStorage("discordToken") var discordToken: String = ""
+    @AppStorage("discordUsername") var discordUsername: String = ""
+    @AppStorage("discordShowButtons") var discordShowButtons: Bool = true
+    @AppStorage("discordShowArtwork") var discordShowArtwork: Bool = true
+
+    // MARK: - Audio Source Modules (InnerTube / Monochrome FLAC / JioSaavn)
+    @AppStorage("preferredAudioSource") var preferredAudioSource: String = "innertube"
+    @AppStorage("monochromeEnabled") var monochromeEnabled: Bool = true
+    @AppStorage("jiosaavnEnabled") var jiosaavnEnabled: Bool = false
+    @AppStorage("jiosaavnQuality") var jiosaavnQuality: String = "320"
+    @AppStorage("monochromeCustomServers") var monochromeCustomServersJSON: String = "[]"
+
+    // MARK: - YouTube Music Account Session
+    @AppStorage("ytInnerTubeCookie") var ytInnerTubeCookie: String = ""
+    @AppStorage("ytVisitorData") var ytVisitorData: String = ""
+    @AppStorage("ytDataSyncId") var ytDataSyncId: String = ""
+    @AppStorage("ytAccountName") var ytAccountName: String = ""
+    @AppStorage("ytAccountEmail") var ytAccountEmail: String = ""
+    @AppStorage("ytAccountHandle") var ytAccountHandle: String = ""
 
     // MARK: - Haptics & Audio Badges
     @AppStorage("musicHapticsEnabled") var musicHapticsEnabled: Bool = false

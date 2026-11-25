@@ -78,6 +78,7 @@ struct NowPlayingView: View {
         }
         .sheet(isPresented: $showQueueSheet) {
             QueueSheetView()
+                .environmentObject(player)
         }
         .sheet(isPresented: $showLyricsSheet) {
             NavigationStack {
@@ -89,6 +90,7 @@ struct NowPlayingView: View {
                         }
                     }
             }
+            .environmentObject(player)
         }
         .sheet(isPresented: $showAudioLabSheet) {
             NavigationStack {
@@ -100,9 +102,11 @@ struct NowPlayingView: View {
                         }
                     }
             }
+            .environmentObject(player)
         }
         .sheet(isPresented: $showSleepTimerSheet) {
             SleepTimerSheet()
+                .environmentObject(player)
         }
         .sheet(isPresented: $showShareSheet) {
             if let track = player.currentTrack {
@@ -112,6 +116,7 @@ struct NowPlayingView: View {
         .sheet(isPresented: $showMenuSheet) {
             if let track = player.currentTrack {
                 SongMenuSheet(track: track)
+                    .environmentObject(player)
             }
         }
         .preferredColorScheme(.dark)

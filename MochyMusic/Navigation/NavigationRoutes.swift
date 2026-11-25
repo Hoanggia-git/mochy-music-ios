@@ -63,6 +63,9 @@ enum AppRoute: Hashable, Identifiable {
     case profile
     case recap
     case nowPlaying
+    case youtubeLogin
+    case discordSettings
+    case modulesSettings
 
     var id: String {
         switch self {
@@ -86,6 +89,9 @@ enum AppRoute: Hashable, Identifiable {
         case .profile: return "profile"
         case .recap: return "recap"
         case .nowPlaying: return "nowPlaying"
+        case .youtubeLogin: return "youtubeLogin"
+        case .discordSettings: return "discordSettings"
+        case .modulesSettings: return "modulesSettings"
         }
     }
 }

@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Main Library hub with profile greeting, 2x2 quick actions, swipe-to-delete playlists, recently played, and create playlist FAB.
+/// Main Library hub with profile greeting, 2x2 quick actions, YouTube Music account sync, swipe-to-delete playlists, and FAB.
 struct LibraryScreen: View {
     @EnvironmentObject private var player: AudioPlayerManager
     @EnvironmentObject private var library: LibraryStore
@@ -10,6 +10,12 @@ struct LibraryScreen: View {
     @State private var showCreatePlaylistAlert = false
     @State private var newPlaylistName = ""
     @State private var newPlaylistDescription = ""
+
+    @State private var ytLikedSongs: [Track] = []
+    @State private var ytPlaylists: [YouTubePlaylist] = []
+    @State private var isSyncingYouTube = false
+    @State private var ytSyncError: String?
+    @State private var showYTLikedExpanded = false
 
     private let twoColumns = [
         GridItem(.flexible(), spacing: 12),
@@ -27,6 +33,14 @@ struct LibraryScreen: View {
 
                     quickActionGrid
                         .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 12, trailing: 16))
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                }
+
+                // YouTube Music Account & Sync Section
+                Section {
+                    youtubeSyncSection
+                        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 10, trailing: 16))
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)
                 }
@@ -129,6 +143,11 @@ struct LibraryScreen: View {
             .padding(.bottom, player.currentTrack != nil ? 148 : 84)
         }
         .navigationBarHidden(true)
+        .task(id: settings.ytInnerTubeCookie) {
+            if !settings.ytInnerTubeCookie.isEmpty && ytPlaylists.isEmpty && ytLikedSongs.isEmpty {
+                await syncYouTubeLibrary()
+            }
+        }
         .alert("New Playlist", isPresented: $showCreatePlaylistAlert) {
             TextField("Playlist name", text: $newPlaylistName)
             TextField("Description (optional)", text: $newPlaylistDescription)
@@ -141,6 +160,186 @@ struct LibraryScreen: View {
                 )
             }
         }
+    }
+
+    // MARK: - YouTube Music Account & Sync
+
+    @ViewBuilder
+    private var youtubeSyncSection: some View {
+        if InnerTubeService.shared.isSignedIn || !settings.ytInnerTubeCookie.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    Circle()
+                        .fill(Color.mochyRed.opacity(0.18))
+                        .frame(width: 40, height: 40)
+                        .overlay(
+                            Image(systemName: "play.rectangle.fill")
+                                .font(.system(size: 16))
+                                .foregroundColor(.mochyRed)
+                        )
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(settings.ytAccountName.isEmpty ? "YouTube Music Connected" : settings.ytAccountName)
+                            .font(.mochySubheadline)
+                            .foregroundColor(.mochyOnBackground)
+                        Text(settings.ytAccountHandle.isEmpty ? (settings.ytAccountEmail.isEmpty ? "Synced library" : settings.ytAccountEmail) : settings.ytAccountHandle)
+                            .font(.mochyCaption)
+                            .foregroundColor(.mochySecondary)
+                    }
+
+                    Spacer()
+
+                    Button {
+                        Task { await syncYouTubeLibrary() }
+                    } label: {
+                        if isSyncingYouTube {
+                            ProgressView()
+                                .tint(settings.accentColor)
+                                .scaleEffect(0.85)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(settings.accentColor)
+                        }
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        router.push(.youtubeLogin)
+                    } label: {
+                        Text("Account")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.mochyPrimary)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Capsule().fill(Color.white.opacity(0.08)))
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if let ytSyncError {
+                    Text(ytSyncError)
+                        .font(.mochyCaption)
+                        .foregroundColor(.mochyRed)
+                }
+
+                // Expandable YouTube Liked Music
+                HStack {
+                    Button {
+                        withAnimation(MochyTheme.snappySpring) {
+                            showYTLikedExpanded.toggle()
+                        }
+                    } label: {
+                        HStack {
+                            Image(systemName: "hand.thumbsup.fill")
+                                .foregroundColor(settings.accentColor)
+                            Text("YouTube Liked Music")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(.mochyOnBackground)
+                            Text("(\(ytLikedSongs.count))")
+                                .font(.mochyCaption)
+                                .foregroundColor(.mochySecondary)
+                            Spacer()
+                            Image(systemName: showYTLikedExpanded ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(.mochySecondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+
+                    if !ytLikedSongs.isEmpty {
+                        Button("Play") {
+                            player.play(tracks: ytLikedSongs, startIndex: 0)
+                        }
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(settings.accentColor)
+                        .padding(.leading, 8)
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.vertical, 6)
+
+                if showYTLikedExpanded && !ytLikedSongs.isEmpty {
+                    VStack(spacing: 2) {
+                        ForEach(Array(ytLikedSongs.prefix(12).enumerated()), id: \.element.id) { idx, track in
+                            TrackRowView(track: track) {
+                                player.play(tracks: ytLikedSongs, startIndex: idx)
+                            }
+                        }
+                    }
+                }
+
+                if !ytPlaylists.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("YouTube Library Playlists")
+                            .font(.mochyCaption)
+                            .foregroundColor(.mochySecondary)
+
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 12) {
+                                ForEach(ytPlaylists) { playlist in
+                                    PlaylistCard(
+                                        title: playlist.name,
+                                        subtitle: playlist.author ?? "YouTube Music",
+                                        thumbnailURL: playlist.thumbnailURL
+                                    ) {
+                                        router.push(.playlist(id: playlist.id, isLocal: false))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(14)
+            .mochyCard(cornerRadius: 16, fillColor: .mochyEffectiveSurface)
+        } else {
+            Button {
+                router.push(.youtubeLogin)
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "play.rectangle.fill")
+                        .font(.system(size: 20))
+                        .foregroundColor(.mochyRed)
+                        .frame(width: 40, height: 40)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.mochyRed.opacity(0.15)))
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Sign in to YouTube Music")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.mochyOnBackground)
+                        Text("Sync your liked songs and YouTube playlists")
+                            .font(.system(size: 11))
+                            .foregroundColor(.mochySecondary)
+                    }
+
+                    Spacer()
+
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.mochySecondary)
+                }
+                .padding(12)
+                .mochyCard(cornerRadius: 14, fillColor: .mochyEffectiveSurface)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func syncYouTubeLibrary() async {
+        guard !isSyncingYouTube else { return }
+        isSyncingYouTube = true
+        ytSyncError = nil
+        do {
+            async let likedTask = InnerTubeService.shared.fetchLikedSongs()
+            async let playlistsTask = InnerTubeService.shared.fetchLibraryPlaylists()
+            let (liked, playlists) = try await (likedTask, playlistsTask)
+            ytLikedSongs = liked
+            ytPlaylists = playlists
+        } catch {
+            ytSyncError = error.localizedDescription
+        }
+        isSyncingYouTube = false
     }
 
     // MARK: - Header
