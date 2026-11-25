@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import CoreMedia
 import MediaToolbox
 import os
 
@@ -200,6 +201,64 @@ private final class EQTapProcessor {
     }
 }
 
+private enum EQTapMixFactory {
+    static func makeAudioMix(for asset: AVAsset) async -> AVAudioMix? {
+        guard let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first else {
+            return nil
+        }
+
+        let processor = EQTapProcessor()
+        let retainedPtr = Unmanaged.passRetained(processor).toOpaque()
+        var callbacks = MTAudioProcessingTapCallbacks(
+            version: kMTAudioProcessingTapCallbacksVersion_0,
+            clientInfo: retainedPtr,
+            init: { _, clientInfo, tapStorageOut in
+                tapStorageOut.pointee = clientInfo
+            },
+            finalize: { tap in
+                let storage = MTAudioProcessingTapGetStorage(tap)
+                Unmanaged<EQTapProcessor>.fromOpaque(storage).release()
+            },
+            prepare: { tap, _, processingFormat in
+                let storage = MTAudioProcessingTapGetStorage(tap)
+                let processor = Unmanaged<EQTapProcessor>.fromOpaque(storage).takeUnretainedValue()
+                processor.prepare(
+                    sampleRate: Float(processingFormat.pointee.mSampleRate),
+                    channels: Int(processingFormat.pointee.mChannelsPerFrame),
+                    formatFlags: processingFormat.pointee.mFormatFlags
+                )
+            },
+            unprepare: { _ in },
+            process: { tap, numberFrames, _, bufferListInOut, numberFramesOut, flagsOut in
+                let status = MTAudioProcessingTapGetSourceAudio(tap, numberFrames, bufferListInOut, flagsOut, nil, numberFramesOut)
+                guard status == noErr else { return }
+                let storage = MTAudioProcessingTapGetStorage(tap)
+                let processor = Unmanaged<EQTapProcessor>.fromOpaque(storage).takeUnretainedValue()
+                processor.process(bufferList: bufferListInOut, frameCount: Int(numberFramesOut.pointee))
+            }
+        )
+
+        var tap: MTAudioProcessingTap?
+        let status = MTAudioProcessingTapCreate(
+            kCFAllocatorDefault,
+            &callbacks,
+            kMTAudioProcessingTapCreationFlag_PostEffects,
+            &tap
+        )
+        guard status == noErr, let createdTap = tap else {
+            Unmanaged<EQTapProcessor>.fromOpaque(retainedPtr).release()
+            return nil
+        }
+
+        let inputParams = AVMutableAudioMixInputParameters(track: audioTrack)
+        inputParams.audioTapProcessor = createdTap
+
+        let audioMix = AVMutableAudioMix()
+        audioMix.inputParameters = [inputParams]
+        return audioMix
+    }
+}
+
 // MARK: - EqualizerService
 
 /// AVAudioEngine + MTAudioProcessingTap 10-band parametric equalizer, reverb, pitch shift, and bass boost service.
@@ -347,59 +406,7 @@ final class EqualizerService: ObservableObject {
     // MARK: - AVPlayer Real-Time AudioMix Tap
 
     func createAudioMix(for asset: AVAsset) async -> AVAudioMix? {
-        guard let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first else {
-            return nil
-        }
-
-        let processor = EQTapProcessor()
-        let retainedPtr = Unmanaged.passRetained(processor).toOpaque()
-        var callbacks = MTAudioProcessingTapCallbacks(
-            version: kMTAudioProcessingTapCallbacksVersion_0,
-            clientInfo: retainedPtr,
-            init: { _, clientInfo, tapStorageOut in
-                tapStorageOut.pointee = clientInfo
-            },
-            finalize: { tap in
-                let storage = MTAudioProcessingTapGetStorage(tap)
-                Unmanaged<EQTapProcessor>.fromOpaque(storage).release()
-            },
-            prepare: { tap, _, processingFormat in
-                let storage = MTAudioProcessingTapGetStorage(tap)
-                let processor = Unmanaged<EQTapProcessor>.fromOpaque(storage).takeUnretainedValue()
-                processor.prepare(
-                    sampleRate: Float(processingFormat.pointee.mSampleRate),
-                    channels: Int(processingFormat.pointee.mChannelsPerFrame),
-                    formatFlags: processingFormat.pointee.mFormatFlags
-                )
-            },
-            unprepare: { _ in },
-            process: { tap, numberFrames, _, bufferListInOut, numberFramesOut, flagsOut in
-                let status = MTAudioProcessingTapGetSourceAudio(tap, numberFrames, bufferListInOut, flagsOut, nil, numberFramesOut)
-                guard status == noErr else { return }
-                let storage = MTAudioProcessingTapGetStorage(tap)
-                let processor = Unmanaged<EQTapProcessor>.fromOpaque(storage).takeUnretainedValue()
-                processor.process(bufferList: bufferListInOut, frameCount: Int(numberFramesOut.pointee))
-            }
-        )
-
-        var tap: MTAudioProcessingTap?
-        let status = MTAudioProcessingTapCreate(
-            kCFAllocatorDefault,
-            &callbacks,
-            kMTAudioProcessingTapCreationFlag_PostEffects,
-            &tap
-        )
-        guard status == noErr, let createdTap = tap else {
-            Unmanaged<EQTapProcessor>.fromOpaque(retainedPtr).release()
-            return nil
-        }
-
-        let inputParams = AVMutableAudioMixInputParameters(track: audioTrack)
-        inputParams.audioTapProcessor = createdTap
-
-        let audioMix = AVMutableAudioMix()
-        audioMix.inputParameters = [inputParams]
-        return audioMix
+        await EQTapMixFactory.makeAudioMix(for: asset)
     }
 
     // MARK: - AVAudioEngine Graph Setup & Live DSP Application
